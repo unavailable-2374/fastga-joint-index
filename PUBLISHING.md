@@ -7,7 +7,9 @@ branch is `main`.
 ```sh
 git clone https://github.com/unavailable-2374/fastga-joint-index.git
 cd fastga-joint-index
-python3 scripts/build.py --jobs 4
+python3 -m pip install -r requirements-benchmark.txt
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSJ_PYTHON_TESTS=ON
+cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure
 ```
 

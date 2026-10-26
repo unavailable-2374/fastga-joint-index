@@ -17,7 +17,14 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
-      - name: Build pinned local sources
-        run: python3 scripts/build.py --jobs 2
+      - name: Build without Python discovery
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_DISABLE_FIND_PACKAGE_Python3=ON
+          cmake --build build --parallel 2
+      - name: Enable complete validation drivers
+        run: |
+          python3 -m pip install -r requirements-benchmark.txt
+          cmake -S . -B build -DCMAKE_DISABLE_FIND_PACKAGE_Python3=OFF -DSJ_PYTHON_TESTS=ON
+          cmake --build build --parallel 2
       - name: SIMULATED correctness fixtures, no performance claims
         run: ctest --test-dir build --output-on-failure

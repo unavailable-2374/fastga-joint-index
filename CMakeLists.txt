@@ -14,7 +14,6 @@ add_compile_options(-UNDEBUG)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
-find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
 find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
 set(OPENMP_DEFAULT OFF)
@@ -22,17 +21,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(OPENMP_DEFAULT ON)
 endif()
 option(SJ_ENABLE_OPENMP "Use OpenMP for the libsais token suffix-array backend" ${OPENMP_DEFAULT})
-option(SJ_SANITIZE_ADAPTER "Instrument the adapter, FastGA driver and codec test with ASAN/UBSAN" OFF)
+option(SJ_SANITIZE_ADAPTER "Instrument native frontends, adapter/driver, provenance writer and codec test with ASAN/UBSAN" OFF)
 if(SJ_ENABLE_OPENMP)
   find_package(OpenMP REQUIRED COMPONENTS C CXX)
 endif()
 
 # Never modify vendored upstream sources. Verify and patch build-local copies.
-execute_process(COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/prepare_vendor.py"
-  --output "${CMAKE_BINARY_DIR}/upstream" RESULT_VARIABLE PREPARED)
-if(NOT PREPARED EQUAL 0)
-  message(FATAL_ERROR "Upstream source verification/patching failed; see the exact error above.")
-endif()
+include(cmake/PrepareVendor.cmake)
 set(FG "${CMAKE_BINARY_DIR}/upstream/fastga")
 set(BWT "${CMAKE_BINARY_DIR}/upstream/bigbwt")
 set(SRC "${PROJECT_SOURCE_DIR}/src")
@@ -65,10 +60,12 @@ add_executable(FastGA-shared-core "${FG}/FastGA.c" "${SRC}/shared_gix.cpp" $<TAR
 target_compile_definitions(FastGA-shared-core PRIVATE SXGC_SHARED_GIX)
 add_executable(FastGA-shared "${SRC}/fastga_frontend.cpp")
 add_executable(GIXmake-shared "${SRC}/fasta_index.cpp")
+add_executable(build-manifest "${PROJECT_SOURCE_DIR}/tools/build_manifest.cpp")
+target_include_directories(build-manifest PRIVATE "${SRC}")
 if(NOT APPLE)
   find_package(OpenSSL 1.1 REQUIRED COMPONENTS Crypto)
 endif()
-foreach(target FastGA-shared GIXmake-shared)
+foreach(target FastGA-shared GIXmake-shared build-manifest)
   target_include_directories(${target} PRIVATE "${PROJECT_SOURCE_DIR}/vendor/nlohmann-json/include")
   target_link_libraries(${target} PRIVATE Threads::Threads)
   if(NOT APPLE)
@@ -128,6 +125,13 @@ foreach(target newscan bwtparse pfbwt)
 endforeach()
 
 include(CTest)
+option(SJ_PYTHON_TESTS "Run complete Python-driven correctness suites (requires Python 3.11+)" OFF)
+if(SJ_PYTHON_TESTS)
+  if(NOT BUILD_TESTING)
+    message(FATAL_ERROR "SJ_PYTHON_TESTS requires BUILD_TESTING=ON")
+  endif()
+  find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
+endif()
 if(BUILD_TESTING)
   add_executable(joint-codec-test "${PROJECT_SOURCE_DIR}/tests/test_codec.cpp"
     $<TARGET_OBJECTS:fastk_native> $<TARGET_OBJECTS:gene>)
@@ -135,6 +139,10 @@ if(BUILD_TESTING)
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/test-results/tmp")
   add_test(NAME codec COMMAND joint-codec-test "${CMAKE_BINARY_DIR}/test-results/weight-frame.bin")
   set_tests_properties(codec PROPERTIES ENVIRONMENT "SXGC_VERIFY_TMPDIR=${CMAKE_BINARY_DIR}/test-results/tmp;ASAN_OPTIONS=detect_leaks=0;UBSAN_OPTIONS=halt_on_error=1")
+endif()
+if(SJ_PYTHON_TESTS)
+  add_test(NAME build-provenance COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_build_provenance.py"
+    --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/build-provenance.json")
   add_test(NAME merge-fasta COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_merge_fasta.py")
   add_test(NAME joint-fixtures COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_joint.py"
     --bin "${CMAKE_BINARY_DIR}" --pfp-tools "${CMAKE_BINARY_DIR}/pfp-tools" --threads 4
@@ -147,24 +155,25 @@ if(BUILD_TESTING)
     --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/index-cli.json")
   set_tests_properties(native-index-cli PROPERTIES
     ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0;UBSAN_OPTIONS=halt_on_error=1")
+  add_test(NAME construction-comparison COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_construction.py"
+    --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/construction.json")
 endif()
 if(SJ_SANITIZE_ADAPTER)
-  foreach(target FastGA-shared GIXmake-shared FastGA-shared-core gixshare joint-codec-test)
+  foreach(target FastGA-shared GIXmake-shared FastGA-shared-core gixshare joint-codec-test build-manifest)
     if(TARGET ${target})
       target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
       target_link_options(${target} PRIVATE -fsanitize=address,undefined)
     endif()
   endforeach()
-  if(BUILD_TESTING)
+  if(SJ_PYTHON_TESTS)
     add_test(NAME sanitized-runtime COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_runtime.py"
       --bin "${CMAKE_BINARY_DIR}" --instrumented "$<TARGET_FILE:FastGA-shared-core>"
       --report "${CMAKE_BINARY_DIR}/test-results/runtime.json")
   endif()
 endif()
 add_custom_target(provenance ALL
-  COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/write_manifest.py"
-    --build "${CMAKE_BINARY_DIR}" --compiler "${CMAKE_C_COMPILER}" --cxx "${CMAKE_CXX_COMPILER}"
-    --openmp "$<BOOL:${SJ_ENABLE_OPENMP}>"
-  DEPENDS FastGA-baseline FastGA-shared GIXmake-shared FastGA-shared-core GIXmake GIXmake-direct GIXmake-marks
+  COMMAND build-manifest "${PROJECT_SOURCE_DIR}" "${CMAKE_BINARY_DIR}"
+    "${CMAKE_C_COMPILER}" "${CMAKE_CXX_COMPILER}" "$<BOOL:${SJ_ENABLE_OPENMP}>"
+  DEPENDS build-manifest FastGA-baseline FastGA-shared GIXmake-shared FastGA-shared-core GIXmake GIXmake-direct GIXmake-marks
     FAtoGDB ALNtoPAF ALNtoPSL gixshare pfp-emit joint-copy newscan bwtparse pfbwt
   VERBATIM)

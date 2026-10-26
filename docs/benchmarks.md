@@ -9,6 +9,12 @@ are not bundled. Standalone build tests are a separate verification record.
 All storage figures below count persistent index companions and descriptors,
 excluding common GDB sequence storage. GB means 1,000,000,000 bytes.
 
+The current benchmark also records complete FASTA-to-index construction times
+in `construction.scopes`, separately from alignment times, with four fresh
+rounds by default. The historical biological runs below did not collect that
+matched construction-time comparison; their missing medians are not inferred
+from conversion times or alignment logs. See [the timing scope](reproducibility.md).
+
 ## Complete human assemblies
 
 Inputs: complete HPRC Year 1 HG002 and HG005 paternal f1 assembly v2 GenBank

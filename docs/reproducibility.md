@@ -30,6 +30,32 @@ frequency 10, chain coverage 85, gap 1000, minimum alignment 100 and identity 0.
 Use identical explicit parameters across backends: upstream's omitted identity
 default and explicit `-i0.7` have a floating-point threshold edge difference.
 
+Construction measurements are separate from alignment. `--build-passes 4`
+(default) runs fresh FASTA-to-index commands in alternating backend order and
+retains every command's observed wall seconds. `report.json` contains `builds`
+(raw stages) and `construction.scopes` (raw rounds, medians and ratios). Native
+uses GIXmake; independent v3 and joint use GIXmake-shared directly from FASTA.
+`--build-backend native|pfp` selects the shared builders' sorting backend.
+Every round undergoes full decoded-record and packed-sequence comparison outside
+the build timer. Repetition indexes are removed only after those checks pass.
+
+The paired scope sums two sequential independent builds for native/v3 and one
+two-input build for joint. The merged scope builds native/v3 from the prepared
+merged FASTA; joint includes the complete two-input construction plus a fresh
+merged FAtoGDB and descriptor publication. The all-view scope sums paired and
+merged native/v3 builds; joint shares its one bundle. Common input QC/FASTA
+merging is recorded as `preparation_wall_seconds` outside all construction times.
+GDB creation, constructor hashing/checks and publication are inside the times.
+Memory/scratch monitors are identical across backends, and monitor shutdown is
+outside elapsed command time. Cache is uncontrolled; medians are descriptive.
+
+`--native-paired` / `--native-merged` reuse existing native controls; their
+unobserved construction times and native ratios are null, never zero. Default
+fresh builds provide all comparisons. A single `--build-passes 1` is explicitly
+one observation. `--simulated-test` labels all reports and resumed workloads
+**SIMULATED TEST DATA**. Historical reports lacking this timing schema have no
+new construction-time claim; reader adoption preserves original producer times.
+
 The first complete PAF is fully parsed, including all CIGAR spans and input
 coordinates. Later complete sorted bytes are compared to it. Their record
 counts follow from exact byte identity; no repeated parser work is necessary.
@@ -37,6 +63,14 @@ Complete seed pairs use bounded-memory external sorting. `SXGC_VERIFY_TMPDIR`
 chooses spill storage; scratch peaks are sampled, not instantaneous maxima.
 
 ## Build and alignment checkpoints
+
+For a construction comparison without alignment or a required compression gain,
+use `--construction-only`. It reports `MEASURED` after the same full build
+correctness controls, including sizes, times and the observed `space_gate`.
+This status makes no space/speed acceptance claim and cannot be resumed as an
+accepted build checkpoint. Small or dissimilar inputs can legitimately have a
+larger joint index; those results are retained rather than labelled successful
+compression. This mode retains its generated indexes for inspection.
 
 `--build-only --keep-indexes` publishes `BUILT` after all six complete index
 record controls and the space gate. It does not claim alignment success.
@@ -86,12 +120,16 @@ comparison. Indexes, GDBs and BPS files must remain immutable during reads.
 ## Local tests
 
 ```sh
+cmake -S . -B build -DSJ_PYTHON_TESTS=ON
+cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure
-python3 scripts/build.py --output build-sanitized --sanitize-adapter --jobs 4
+cmake -S . -B build-sanitized -DSJ_SANITIZE_ADAPTER=ON -DSJ_PYTHON_TESTS=ON
+cmake --build build-sanitized --parallel 4
 ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|native-index-cli|sanitized-runtime' --output-on-failure
 ```
 
 CTest's generated data are explicitly labelled SIMULATED, and temporary fixture
 directories are deleted after execution. Reports stay under the ignored build
-directory. The sanitizer scope is the adapter/driver and codec test; linked
-support objects are not instrumented, and leak detection is disabled.
+directory. The sanitizer scope includes the native frontends/builder,
+adapter/driver, packer, provenance writer and codec test; linked support objects
+are not instrumented, and leak detection is disabled.

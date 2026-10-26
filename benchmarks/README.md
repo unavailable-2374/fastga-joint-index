@@ -1,5 +1,11 @@
 # Benchmark summaries
 
+* [`cmake-build-verification.json`](cmake-build-verification.json): current local
+  CMake-only build and native provenance checks, construction-time accounting
+  tests, and full normal/sanitized correctness controls. Construction fixtures
+  are **SIMULATED TEST DATA**; their unmet space target is retained, with no
+  biological build-speed claim.
+
 * [`hap.json`](hap.json): complete historical HAP acceptance, including exact
   index sizes, full seed/PAF equality counts, all accepted timing observations
   and the documented replacement of one confounded paired round.
@@ -14,7 +20,7 @@
 * [`native-runtime-verification.json`](native-runtime-verification.json): historical
   checks of the first C++ automatic entry point, before replacing the standalone
   Python index constructor.
-* [`unified-index-verification.json`](unified-index-verification.json): current
+* [`unified-index-verification.json`](unified-index-verification.json): historical
   standalone/automatic C++ indexing checks, including all storage/backend
   combinations, reference changes, masks, three inputs and concurrent publication.
   Complete record/seed/PAF controls run with no Python on PATH under normal and

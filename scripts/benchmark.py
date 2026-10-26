@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Complete-input v4/native/independent-v3 correctness and timing gates.
 
-No subsampling or simulated performance data. Four paired rounds reverse backend
-order. All persistent index companions are counted; common GDB is also reported.
+No subsampling or fabricated performance observations. Four paired rounds reverse
+backend order. --simulated-test explicitly labels test inputs. All persistent
+index companions are counted; common GDB is also reported.
 """
 import argparse
 import json
@@ -13,9 +14,12 @@ import socket
 import shutil
 import statistics
 import sys
+import time
+import re
 from sequence_io import fasta_stats,paf_stats,save
 from sequence_io import merge_fastas
 from validation import Runner,digest,gix_files,toolchain_hashes
+from construction import compare_builds
 
 HERE=Path(__file__).resolve().parent
 
@@ -30,20 +34,25 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--bin',type=Path,default=HERE.parent/'build')
-    p.add_argument('--pfp-tools',type=Path,default=HERE.parent/'build/pfp-tools')
+    p.add_argument('--pfp-tools',type=Path,help='Custom pinned PFP tools to freeze; default BIN/pfp-tools')
     p.add_argument('--inputs',type=Path,nargs=2,help='Two complete FASTA or FASTA.gz inputs; required unless resuming a checkpoint')
     p.add_argument('--names',nargs=2,default=['A','B'])
     p.add_argument('--threads',type=int,default=24)
     p.add_argument('--passes',type=int,default=4,choices=(4,))
+    p.add_argument('--build-passes',type=int,default=4,choices=range(1,33),help='Fresh construction rounds (default 4); a single round is only one observation')
+    p.add_argument('--build-backend',choices=('native','pfp'),default='native',help='Sorting backend for both direct v3 and joint constructors; native baseline stays GIXmake')
+    p.add_argument('--simulated-test',action='store_true',help='Label the entire report SIMULATED TEST DATA; never biological performance evidence')
     p.add_argument('--native-paired',type=Path,help='Reuse complete native indexes; input identity still checked')
     p.add_argument('--native-merged',type=Path)
     p.add_argument('--keep-indexes',action='store_true')
     p.add_argument('--build-only',action='store_true',help='Publish a verified BUILT checkpoint; no alignment success is claimed')
+    p.add_argument('--construction-only',action='store_true',help='Publish MEASURED sizes/times after full build correctness checks, even if the space target is unmet; no acceptance/alignment claim')
     p.add_argument('--resume-build',type=Path,help='Run one complete workload against an immutable BUILT checkpoint')
     p.add_argument('--workload',choices=('AB','BA','self'))
     p.add_argument('--reuse-controls',action='store_true',help='Reuse completed full seed/PAF controls from the same immutable build and binary hashes')
     a=p.parse_args()
-    if not 3<=a.threads<=32 or len(set(a.names))!=2:p.error('requires 3..32 total threads and distinct names')
+    if a.construction_only and (a.build_only or a.resume_build):p.error('--construction-only excludes --build-only and --resume-build')
+    if not 3<=a.threads<=32 or len({n.lower() for n in a.names})!=2 or any(not re.fullmatch('[A-Za-z0-9_-]+',n) or n.lower()=='merged' for n in a.names):p.error('requires 3..32 total threads and distinct safe sample names other than merged')
     a.affinity=bind_allocation(a.threads)
     if a.resume_build:
         if not a.workload or a.build_only:p.error('--resume-build requires --workload and excludes --build-only')
@@ -54,40 +63,25 @@ def main():
     report=dict(status='RUNNING',kind='COMPLETE_FASTA_INPUTS',input_identity_note='Biological provenance follows the supplied source manifests and input hashes; it is not inferred from sample labels.',threads=a.threads,sources={},checks=[],builds=[],storage={},alignments=[],parameters=dict(k=40,syncmer=[12,8],frequency=10,chain_coverage=85,chain_gap=1000,min_alignment=100,min_identity=.7),
                 platform=platform.platform(),cpu_affinity=a.affinity,runner_sha256=digest(Path(__file__)),paf_validation='First complete PAF fully parsed; subsequent complete sorted bytes compared exactly, inheriting the proven record count.',cache='Uncontrolled OS cache; four rounds with reverse backend order; timings are descriptive.',
                 source_audit='No separate native-GIX versus original-FASTA audit; exact constructor invariants, complete decoded records and alignment comparisons are required.')
+    if a.simulated_test:report['kind']='SIMULATED TEST DATA; no biological performance claims'
+    report['runner_sources_sha256']={name:digest(HERE/name) for name in ('benchmark.py','construction.py','validation.py','sequence_io.py')}
     save(root/'report.json',report)
     try:
-        runner=Runner(root,a.bin.resolve());binary=runner.binpath;scratch=root/'scratch';scratch.mkdir()
+        runner=Runner(root,a.bin.resolve(),pfp_tools=a.pfp_tools);binary=runner.binpath;scratch=root/'scratch';scratch.mkdir()
         runner.env['SXGC_VERIFY_TMPDIR']=str(scratch)
         report['executables']=toolchain_hashes(binary)
         runner.run('gixshare-help',[binary/'gixshare','--help']);runner.run('joint-copy-help',[binary/'joint-copy','--help'])
         runner.run('builder-help',[binary/'GIXmake-shared','--help'])
         sort=shutil.which('sort');runner.run('sort-help',[sort,'--help'])
-        native=a.native_paired.resolve() if a.native_paired else root/'native-paired'
-        merged_native=a.native_merged.resolve() if a.native_merged else root/'native-merged'
-        if not a.native_paired:native.mkdir()
-        if not a.native_merged:merged_native.mkdir()
+        # Usage without arguments prints the complete upstream parameter tables.
+        for tool in ('GIXmake','FAtoGDB'):
+            runner.run(tool+'-help',[binary/tool],expected_error='Usage:')
+        started=time.monotonic()
         for name,source in zip(a.names,a.inputs):
             source=source.resolve();report['sources'][name]=dict(path=str(source),sha256=digest(source),**fasta_stats(source))
-            if not a.native_paired:runner.run('index-'+name,[binary/'GIXmake','-v',f'-T{a.threads}','-k40','-P'+str(scratch),source,native/name])
         merged=root/'merged.fa';report['merged']=merge_fastas([dict(v,sample=k) for k,v in report['sources'].items()],merged)
-        if not a.native_merged:runner.run('index-merged',[binary/'GIXmake','-v',f'-T{a.threads}','-k40','-P'+str(scratch),merged,merged_native/'merged'])
-        sources={};source_files=[]
-        for name in [*a.names,'merged']:
-            input_dir=merged_native if name=='merged' else native;out=root/('source-'+name)
-            runner.run('source-'+name,[binary/'gixshare','build','-o',out,'--storage','source',input_dir/(name+'.gix')]);sources[name]=out/(name+'.gix')
-            source_files.extend(f for f in out.iterdir() if f.suffix=='.gix' or f.name=='READY')
-            check=runner.run('source-records-'+name,[binary/'gixshare','verify',input_dir/(name+'.gix'),sources[name]])
-            report['checks'].append(dict(storage='source',sample=name,**json.loads(check.read_text())))
-        joint=root/'joint'
-        runner.run('joint-direct',[binary/'GIXmake-shared','--bin',binary,'--pfp-tools',a.pfp_tools.resolve(),'--storage','joint','--reference',a.names[0],'--input',a.names[0]+'='+report['sources'][a.names[0]]['path'],'--input',a.names[1]+'='+report['sources'][a.names[1]]['path'],'--output',joint,'--threads',a.threads,'--scratch',scratch],measure_tree=True,temporary_dir=scratch)
-        report['joint_build']=dict(runner.rows[-1],manifest=json.loads((joint/'build.json').read_text()))
-        view=root/'merged-view';view.mkdir()
-        for name in ('merged.1gdb','merged.gdb','.merged.bps'):
-            if (merged_native/name).exists():(view/name).symlink_to(merged_native/name)
-        runner.run('joint-merged-view',[binary/'gixshare','view','--index',joint,'--samples',','.join(a.names),'--gdb',view/'merged.1gdb','--output',view/'merged.gix'])
-        for name,path in [(n,joint/(n+'.gix')) for n in a.names]+[('merged',view/'merged.gix')]:
-            check=runner.run('joint-records-'+name,[binary/'gixshare','verify-equivalent',(merged_native if name=='merged' else native)/(name+'.gix'),path])
-            report['checks'].append(dict(storage='joint',sample=name,**json.loads(check.read_text())))
+        report['preparation_wall_seconds']=time.monotonic()-started
+        native,merged_native,sources,joint,view=compare_builds(a,runner,report,merged,scratch)
         def index_files(directory):return {f.name:f.stat().st_size for f in directory.iterdir() if f.suffix=='.gix' or f.name in ('READY','reference.sgr','residual.sgr','reference.meta','target.meta','sequences.sgd') or f.name.startswith('joint.')}
         jf=index_files(joint);paired_source=sum(sum(index_files(sources[n].parent).values()) for n in a.names)
         report['storage']=dict(native_paired_bytes=sum(f.stat().st_size for f in gix_files(native)),native_merged_bytes=sum(f.stat().st_size for f in gix_files(merged_native)),
@@ -96,15 +90,23 @@ def main():
             common_paired_GDB_bytes=sum(f.stat().st_size for f in native.iterdir() if f.suffix in ('.1gdb','.gdb','.bps')),
             common_merged_GDB_bytes=sum(f.stat().st_size for f in merged_native.iterdir() if f.suffix in ('.1gdb','.gdb','.bps')))
         report['storage']['joint_merged_only_bytes']=sum(v for k,v in jf.items() if k not in {n+'.gix' for n in a.names})+(view/'merged.gix').stat().st_size
+        for mode,key in [('native','native_paired_bytes'),('source','source_independent_paired_bytes')]:
+            report['storage'][mode+'_all_views_bytes']=report['storage'][key]+report['storage'][mode+'_merged_bytes']
         import filecmp
         for name in a.names:
             if not filecmp.cmp(native/('.'+name+'.bps'),joint/('.'+name+'.bps'),shallow=False):raise RuntimeError('reused/native packed sequence differs from FASTA-direct input: '+name)
         report['paths']=dict(native_paired=str(native),native_merged=str(merged_native),joint=str(joint),merged_view=str(view),sources={k:str(v) for k,v in sources.items()})
         report['names']=a.names;report['space_gate']=report['storage']['joint_all_views_bytes']<paired_source
+        for source in report['sources'].values():
+            if digest(Path(source['path']))!=source['sha256']:raise RuntimeError('input changed during construction')
         save(root/'report.json',report)
+        if a.construction_only:
+            report['status']='MEASURED';save(root/'report.json',report)
+            print(json.dumps(dict(status='MEASURED',space_gate=report['space_gate'],storage=report['storage'],construction=report['construction'])))
+            return
         if a.build_only:
             if not report['space_gate']:raise RuntimeError('joint space acceptance target failed')
-            report['status']='BUILT';save(root/'report.json',report);print(json.dumps(dict(status='BUILT',storage=report['storage'])));return
+            report['status']='BUILT';save(root/'report.json',report);print(json.dumps(dict(status='BUILT',storage=report['storage'],construction=report['construction'])));return
         directories={'native':{**{n:native/(n+'.gix') for n in a.names},'merged':merged_native/'merged.gix'},'source':sources,'joint':{**{n:joint/(n+'.gix') for n in a.names},'merged':view/'merged.gix'}}
         expected={}
         for repeat in range(-1,a.passes):
@@ -146,7 +148,7 @@ def main():
             for path,reused in [(native,a.native_paired),(merged_native,a.native_merged)]:
                 if not reused:shutil.rmtree(path)
             merged.unlink();report['cleanup']='Removed generated indexes, scratch, merged FASTA and frozen tools; retained evidence; reused inputs untouched.'
-        report['status']='PASS';save(root/'report.json',report);print(json.dumps(dict(status='PASS',storage=report['storage'],performance=report['performance']),indent=2))
+        report['status']='PASS';save(root/'report.json',report);print(json.dumps(dict(status='PASS',storage=report['storage'],construction=report['construction'],performance=report['performance']),indent=2))
     except BaseException as e:report['status']='FAILED';report['error']=str(e);save(root/'report.json',report);raise
 
 def run_workload(a):
@@ -156,7 +158,7 @@ def run_workload(a):
     if base['status'] not in ('BUILT','PASS') or not base.get('space_gate'):raise RuntimeError('verified build checkpoint is not ready')
     if a.threads!=base['threads']:raise RuntimeError('workload thread budget differs from build')
     root=a.output.resolve();root.mkdir(parents=True,exist_ok=False)
-    report=dict(status='RUNNING',kind='COMPLETE_FASTA_INPUTS',input_identity_note=base['input_identity_note'],build=str(build),workload=a.workload,threads=a.threads,cpu_affinity=a.affinity,executables=base['executables'],alignments=[],checks=[],cache='Four rounds, reverse backend order; uncontrolled OS cache.',paf_validation='First complete PAF fully parsed; subsequent complete sorted bytes compared exactly, inheriting the proven record count.',runner_sha256=digest(Path(__file__)),hostname=socket.gethostname(),platform=platform.platform(),allocation={k:os.environ.get(k) for k in ('SLURM_JOB_ID','SLURM_CPUS_PER_TASK','SLURM_MEM_PER_NODE')})
+    report=dict(status='RUNNING',kind=base['kind'],input_identity_note=base['input_identity_note'],build=str(build),workload=a.workload,threads=a.threads,cpu_affinity=a.affinity,executables=base['executables'],alignments=[],checks=[],cache='Four rounds, reverse backend order; uncontrolled OS cache.',paf_validation='First complete PAF fully parsed; subsequent complete sorted bytes compared exactly, inheriting the proven record count.',runner_sha256=digest(Path(__file__)),hostname=socket.gethostname(),platform=platform.platform(),allocation={k:os.environ.get(k) for k in ('SLURM_JOB_ID','SLURM_CPUS_PER_TASK','SLURM_MEM_PER_NODE')})
     save(root/'report.json',report)
     try:
         for name,sha in base['executables'].items():

@@ -1,0 +1,368 @@
+{
+  "status": "PASS",
+  "kind": "BUILD AND SIMULATED TEST VERIFICATION; no biological performance claim",
+  "verified_at_utc": "2026-10-26T19:26:54.304947+00:00",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "scope": "CMake-only build, native provenance, fair FASTA-to-index construction accounting, and unchanged complete index/seed/PAF correctness controls.",
+  "source_sha256": {
+    "CMakeLists.txt": "f71d6fafa696ccd18265658f2832d56fef779d0465b156363635fdc1cda3eef2",
+    "cmake/PrepareVendor.cmake": "95c01acf3bd6bdcfa342ad2c7f22af1c55e62b545ae77cbc4b65f775ec7add71",
+    "tools/build_manifest.cpp": "c574f4348dfa181e0193966c098dff3e73965093d4e4765026f5235d71d7adb5",
+    "scripts/benchmark.py": "36f320fbd157195d7fb3b97aea95025d435494dfb193398842088517ed4c0177",
+    "scripts/construction.py": "aa8fc3d7941b599c0814370938dbb4a30be09e737e392d2a633d90de9eca8a66",
+    "scripts/validation.py": "116ad0da121712020ca68174470f96236b3d0846a20813cf4a7a9c567946c505",
+    "scripts/adopt_build.py": "fb3eff2cbfdf955e4dabd0c986b28e6378d3c8251fc7c47b9123654d3340d9c1",
+    "scripts/finalize_benchmark.py": "1469c8955d408c963aa492a2be5e053f8271e2f8fd92c1f744306288a2d80b47",
+    "scripts/merge_fasta.py": "94231165348a2a7fb332a047194116c19042159de17bec0686f87329437d97d9",
+    "tests/test_construction.py": "52dc7b478725cd64020e6077e337b4e7f6309503313b33919d8b406b4d6b531a",
+    "tests/test_build_provenance.py": "cf745e8b4b7e0ed2eed70e4346579d91a16ab94f78a7684fa40744292c05bff6",
+    ".github/workflows/ci.yml": "8796992abbfef4c33f1fe269b8aa9066f0daa7a978c18d940b8a7c479d9f8e4d"
+  },
+  "production": {
+    "build_system": "CMake",
+    "python_build_dependency": false,
+    "source_verification": "Native CMake SHA-256 and pinned patched-source verification",
+    "provenance_writer": "C++17 tools/build_manifest.cpp",
+    "removed": [
+      "scripts/build.py",
+      "scripts/prepare_vendor.py",
+      "scripts/write_manifest.py",
+      "Makefile"
+    ],
+    "merge_fasta_retained_unchanged": true,
+    "unchanged_original_core_files": 16
+  },
+  "no_python_build": {
+    "status": "PASS",
+    "python_package_discovery_disabled": true,
+    "python_test_drivers": false,
+    "complete_native_build": true,
+    "native_codec_test": "1/1 PASS",
+    "incremental_no_recompilation": true
+  },
+  "native_provenance_checks": [
+    {
+      "check": "actual compiler versions and native provenance writer",
+      "status": "PASS"
+    },
+    {
+      "check": "all reported source, frontend and PFP hashes match actual bytes",
+      "status": "PASS"
+    },
+    {
+      "check": "reconfigure verifies and reuses unchanged patched sources",
+      "status": "PASS"
+    },
+    {
+      "check": "build automatically rechecks and restores tampered build-local source",
+      "status": "PASS"
+    },
+    {
+      "check": "EXPECTED TEST REJECTION: vendored source checksum mismatch: fastga/FastGA.c",
+      "status": "PASS"
+    },
+    {
+      "check": "valid pinned source recovery after expected rejection",
+      "status": "PASS"
+    }
+  ],
+  "regular_tests": {
+    "ctest": "6/6 PASS; additional build-provenance suite PASS",
+    "joint_checks": 245,
+    "automatic_cli_checks": 37,
+    "standalone_cli_checks": 83
+  },
+  "construction_tests": {
+    "status": "PASS",
+    "kind": "SIMULATED TEST DATA; no biological or speed claims",
+    "checks": [
+      {
+        "case": "native",
+        "passes": 4,
+        "build_commands": 36,
+        "complete_record_controls": 33,
+        "space_target_met": false,
+        "storage_bytes": {
+          "native_paired_bytes": 272563284,
+          "native_merged_bytes": 138345392,
+          "source_independent_paired_bytes": 4390192,
+          "source_merged_bytes": 2234261,
+          "joint_files": {
+            "READY": 17,
+            "joint.copies": 52,
+            "reference.sgr": 448578,
+            "reference.meta": 184,
+            "residual.sgr": 148,
+            "joint.names": 4,
+            "joint.order": 2098,
+            "A.gix": 1670139,
+            "B.gix": 1670139,
+            "target.meta": 184
+          },
+          "joint_paired_bytes": 3791543,
+          "joint_all_views_bytes": 5449475,
+          "joint_merged_descriptor_bytes": 1657932,
+          "common_paired_GDB_bytes": 101844,
+          "common_merged_GDB_bytes": 100979,
+          "joint_merged_only_bytes": 2109197,
+          "native_all_views_bytes": 410908676,
+          "source_all_views_bytes": 6624453
+        },
+        "status": "PASS"
+      },
+      {
+        "case": "native",
+        "query": "A",
+        "storage": "source",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "native",
+        "query": "A",
+        "storage": "joint",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "native",
+        "query": "B",
+        "storage": "source",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "native",
+        "query": "B",
+        "storage": "joint",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "native",
+        "query": "merged",
+        "storage": "source",
+        "paf_records": 2,
+        "status": "PASS",
+        "exact_seed_pairs": 317500,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "native",
+        "query": "merged",
+        "storage": "joint",
+        "paf_records": 2,
+        "status": "PASS",
+        "exact_seed_pairs": 317500,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "pfp",
+        "passes": 1,
+        "build_commands": 9,
+        "complete_record_controls": 6,
+        "space_target_met": false,
+        "storage_bytes": {
+          "native_paired_bytes": 272563284,
+          "native_merged_bytes": 138345392,
+          "source_independent_paired_bytes": 4390196,
+          "source_merged_bytes": 2213926,
+          "joint_files": {
+            "READY": 17,
+            "joint.copies": 52,
+            "reference.sgr": 448586,
+            "reference.meta": 184,
+            "residual.sgr": 155,
+            "joint.names": 4,
+            "joint.order": 2096,
+            "A.gix": 1670144,
+            "B.gix": 1670144,
+            "target.meta": 184
+          },
+          "joint_paired_bytes": 3791566,
+          "joint_all_views_bytes": 5449498,
+          "joint_merged_descriptor_bytes": 1657932,
+          "common_paired_GDB_bytes": 101838,
+          "common_merged_GDB_bytes": 100970,
+          "joint_merged_only_bytes": 2109210,
+          "native_all_views_bytes": 410908676,
+          "source_all_views_bytes": 6604122
+        },
+        "status": "PASS"
+      },
+      {
+        "case": "pfp",
+        "query": "A",
+        "storage": "source",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "pfp",
+        "query": "A",
+        "storage": "joint",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "pfp",
+        "query": "B",
+        "storage": "source",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "pfp",
+        "query": "B",
+        "storage": "joint",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "pfp",
+        "query": "merged",
+        "storage": "source",
+        "paf_records": 2,
+        "status": "PASS",
+        "exact_seed_pairs": 317500,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "pfp",
+        "query": "merged",
+        "storage": "joint",
+        "paf_records": 2,
+        "status": "PASS",
+        "exact_seed_pairs": 317500,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "reused",
+        "passes": 1,
+        "build_commands": 6,
+        "complete_record_controls": 6,
+        "space_target_met": false,
+        "storage_bytes": {
+          "native_paired_bytes": 272563284,
+          "native_merged_bytes": 138345392,
+          "source_independent_paired_bytes": 4390192,
+          "source_merged_bytes": 2234261,
+          "joint_files": {
+            "READY": 17,
+            "joint.copies": 52,
+            "reference.sgr": 448578,
+            "reference.meta": 184,
+            "residual.sgr": 148,
+            "joint.names": 4,
+            "joint.order": 2093,
+            "A.gix": 1670139,
+            "B.gix": 1670139,
+            "target.meta": 184
+          },
+          "joint_paired_bytes": 3791538,
+          "joint_all_views_bytes": 5449470,
+          "joint_merged_descriptor_bytes": 1657932,
+          "common_paired_GDB_bytes": 101844,
+          "common_merged_GDB_bytes": 100979,
+          "joint_merged_only_bytes": 2109192,
+          "native_all_views_bytes": 410908676,
+          "source_all_views_bytes": 6624453
+        },
+        "status": "PASS"
+      },
+      {
+        "case": "reused",
+        "query": "A",
+        "storage": "source",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "reused",
+        "query": "A",
+        "storage": "joint",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "reused",
+        "query": "B",
+        "storage": "source",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "reused",
+        "query": "B",
+        "storage": "joint",
+        "paf_records": 1,
+        "status": "PASS",
+        "exact_seed_pairs": 79375,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "reused",
+        "query": "merged",
+        "storage": "source",
+        "paf_records": 2,
+        "status": "PASS",
+        "exact_seed_pairs": 317500,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      {
+        "case": "reused",
+        "query": "merged",
+        "storage": "joint",
+        "paf_records": 2,
+        "status": "PASS",
+        "exact_seed_pairs": 317500,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      }
+    ],
+    "raw_source_sha256": {
+      "tests/test_construction.py": "52dc7b478725cd64020e6077e337b4e7f6309503313b33919d8b406b4d6b531a",
+      "scripts/construction.py": "aa8fc3d7941b599c0814370938dbb4a30be09e737e392d2a633d90de9eca8a66",
+      "scripts/benchmark.py": "36f320fbd157195d7fb3b97aea95025d435494dfb193398842088517ed4c0177",
+      "scripts/validation.py": "116ad0da121712020ca68174470f96236b3d0846a20813cf4a7a9c567946c505"
+    },
+    "note": "Actual complete construction and correctness checks on explicitly SIMULATED 200,000-base identical inputs. The joint space target was false in these tests and was retained honestly. No biological build-speed inference."
+  },
+  "sanitized_tests": {
+    "ctest": "5/5 PASS",
+    "native_provenance_checks": 6,
+    "automatic_cli_checks": 37,
+    "standalone_cli_checks": 83,
+    "core_runtime_checks": 12,
+    "scope": "Native frontends/builder, adapter/driver, packer, native provenance writer and codec; linked upstream support objects not instrumented; leak detection disabled."
+  },
+  "executable_sha256": {
+    "build-manifest": "314189bb53828fde7a1439688adb254950cc4c15b09b84f5c32c30a72c5fc8f9",
+    "FastGA-shared": "19d14bd4ef8e73b96a3ff0b2855446fe9ddb96097484f2d8be98da0d20cd7457",
+    "GIXmake-shared": "33a958360aafb4dcbb1fba9080edaebc6fe559737af36aaf5b54ada7a07add94",
+    "FastGA-shared-core": "95dd28487a597275a68f8bfcae90bc4a9843e75d0660ac87c19f4358a5162d44",
+    "gixshare": "7e481acb17453e4aa856daffda02a70541b35e1bae4903cec58c75d2a4290cbb"
+  },
+  "historical_biological_reports_unchanged": true
+}

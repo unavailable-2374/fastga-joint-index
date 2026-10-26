@@ -61,7 +61,7 @@ def main():
             for storage in ('source', 'joint'):
                 target = Path(paths['sources'][name]) if storage == 'source' else (Path(paths['merged_view']) if name == 'merged' else joint) / (name + '.gix')
                 result = runner.run(storage + '-records-' + name,
-                                    [binary / 'gixshare', 'verify' if storage == 'source' else 'verify-equivalent', native, target],
+                                    [binary / 'gixshare', 'verify-equivalent', native, target],
                                     temporary_dir=scratch)
                 report['checks'].append(dict(storage=storage, sample=name, **json.loads(result.read_text())))
                 save(root / 'report.json', report)

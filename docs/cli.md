@@ -4,7 +4,8 @@ The entry point and automatic constructor are C++17. Runtime dispatch, hashing,
 cache locking, process supervision and construction invoke native tools directly.
 They require no Python interpreter or runtime script. The standalone
 `GIXmake-shared` index command uses the same C++ builder, including both sorting
-backends and all storage formats. Python supports build/test utilities, FASTA
+backends and all storage formats. The CMake build also requires no Python.
+Python supports optional test drivers, FASTA
 preparation and benchmark analysis; the Python index constructor has been removed.
 
 ```sh

@@ -36,8 +36,7 @@ and [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Build
 
-Build requirements: Linux or macOS, CMake 3.20+, Python 3.11+ for source
-verification/provenance and tests, a C11/C++17 compiler, pthread, zlib development
+Build requirements: Linux or macOS, CMake 3.20+, a C11/C++17 compiler, pthread, zlib development
 headers, and `patch`. Linux also needs OpenSSL 1.1+ development files for SHA-256;
 macOS uses system CommonCrypto. Linux builds use OpenMP for libsais by default;
 macOS builds use its serial backend by default. JSON for Modern C++ is vendored.
@@ -45,19 +44,23 @@ macOS builds use its serial backend by default. JSON for Modern C++ is vendored.
 **Index construction and alignment have native C++ entry points.** `GIXmake-shared`
 and `FastGA-shared` use one C++ builder for both native and PFP sorting, with no
 Python invocation. The former Python index constructor has been removed. Python
-supports build/provenance utilities, tests, benchmark analysis and FASTA preparation.
-
-```sh
-python3 scripts/build.py --jobs 4
-export PATH="$PWD/build:$PATH"
-ctest --test-dir build --output-on-failure
-```
-
-Equivalent build commands:
+is optional, used only for tests, benchmark analysis and FASTA preparation.
+The build itself uses CMake checksum verification and a native C++ provenance writer.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 4
+export PATH="$PWD/build:$PATH"
+```
+
+For the complete correctness suites, install Python 3.11+ and the benchmark
+monitoring dependency, then explicitly enable the Python test drivers:
+
+```sh
+python3 -m pip install -r requirements-benchmark.txt
+cmake -S . -B build -DSJ_PYTHON_TESTS=ON
+cmake --build build --parallel 4
+ctest --test-dir build --output-on-failure
 ```
 
 All required upstream source is vendored, pinned and checksum verified. Building
@@ -65,6 +68,8 @@ requires no source downloads. Patches apply only to copies under `build/upstream
 upstream sources and input genomes are not overwritten. Builds record compiler
 commands, source hashes and executable hashes in `build/build.json` and
 `build/pfp-tools/build.json`. Assertions remain enabled in Release builds.
+The default test configuration includes the native codec test; the full Python
+suites require `SJ_PYTHON_TESTS=ON` and fail configuration if Python is unavailable.
 
 ## Index and align in one command
 
@@ -184,9 +189,17 @@ python3 scripts/benchmark.py \
   --threads 24 --output results/full-comparison
 ```
 
-The driver builds independent native/v3/joint baselines, verifies all decoded
-index records, compares complete seed-pair multisets, and executes four timed
-rounds per backend. It requires exact complete PAF bytes and joint/v3 median
+Add `--construction-only` to compare index sizes and build times without running
+alignment. It retains correct measurements even when a joint index is larger,
+reports `MEASURED`, and makes no compression or speed acceptance claim.
+
+The driver reports index bytes **and complete FASTA-to-index construction time**
+for native/v3/joint backends: four fresh build rounds, raw seconds, medians and
+joint/native and joint/v3 ratios for paired, merged and all-view scopes. v3 is
+constructed directly from FASTA; joint merged timing includes its fresh GDB.
+It verifies every decoded index record in every build round, compares complete
+seed-pair multisets, and separately executes four timed alignment rounds per
+backend. It requires exact complete PAF bytes and joint/v3 alignment median
 time ≤ 1.2. It never substitutes a sample or synthetic output after a failure.
 Use a new output directory and enough scratch space for full external sorting.
 Details and checkpoint workflows are in [reproducibility](docs/reproducibility.md).
@@ -202,19 +215,22 @@ documented pair/self commands, mixed FASTA/GIX inputs, low thread budgets,
 gzip/space-containing paths, retained-index reuse/concurrency, and failure cleanup.
 
 ```sh
-python3 scripts/build.py --output build-sanitized --sanitize-adapter --jobs 4
+cmake -S . -B build-sanitized -DSJ_SANITIZE_ADAPTER=ON -DSJ_PYTHON_TESTS=ON
+cmake --build build-sanitized --parallel 4
 ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|native-index-cli|sanitized-runtime' --output-on-failure
 ```
 
 This optional sanitizer configuration instruments the C++ entry point/builder,
-FastGA driver/adapter, packer and codec test. Linked upstream support objects are not instrumented;
+FastGA driver/adapter, packer, provenance writer and codec test. Linked upstream support objects are not instrumented;
 leak detection is disabled. It does not certify the entire upstream program.
-Current local evidence is in [unified C++ indexing verification](benchmarks/unified-index-verification.json).
+The previous C++ migration snapshot is in [unified indexing verification](benchmarks/unified-index-verification.json).
+Current local checks are in [CMake build and timing verification](benchmarks/cmake-build-verification.json).
 
 | Directory | Contents |
 |---|---|
 | `src/` | Original constructor/codecs/stream backend plus the C++ FASTA entry point |
-| `scripts/` | Construction, complete-input benchmarks and provenance utilities |
+| `cmake/`, `tools/` | Source verification and native build provenance |
+| `scripts/` | Complete-input benchmarks, validation and FASTA preparation |
 | `tests/` | Explicitly labelled simulated correctness fixtures |
 | `vendor/`, `patches/` | Pinned upstream sources and reviewable modifications |
 | `docs/` | Method, binary format, reproducibility and measured results |

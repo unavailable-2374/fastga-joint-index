@@ -30,20 +30,30 @@
 ## 构建与使用
 
 构建依赖 Linux/macOS、CMake ≥3.20、C11/C++17 编译器、zlib、pthread、patch；
-Python ≥3.11 用于源码校验、构建记录和测试。Linux 另需 OpenSSL ≥1.1 开发文件，
+Linux 另需 OpenSSL ≥1.1 开发文件，
 macOS 使用系统 CommonCrypto 计算 SHA-256。JSON 库及原有上游源码已固定版本保存，
 构建不下载源码。**独立索引命令 `GIXmake-shared` 与 `FastGA-shared` 共用 C++
 构建器，原生排序和 PFP 排序均不调用 Python；原 Python 索引构建器已删除。**
-Python 用于构建辅助、测试、基准分析和 FASTA 准备工具。
+**构建仅使用 CMake，不依赖 Python**；源码校验由 CMake 完成，构建记录由 C++ 工具生成。
+Python ≥3.11 仅用于可选测试、基准分析和 FASTA 准备工具；保留 `scripts/merge_fasta.py`。
 
 ```sh
-python3 scripts/build.py --jobs 4
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 4
 export PATH="$PWD/build:$PATH"
-ctest --test-dir build --output-on-failure
 
 FastGA-shared -T24 -pafx A.fa B.fa > A_B.paf
 FastGA-shared -T24 -pafx A.fa > A.paf
 ```
+
+完整测试需安装 `requirements-benchmark.txt` 并配置 `-DSJ_PYTHON_TESTS=ON`，然后重新构建并运行
+`ctest --test-dir build --output-on-failure`；默认仅启用原生 codec 测试。
+基准脚本现在同时输出索引大小与完整构建时长：默认四轮独立从 FASTA 构建，报告原始秒数、
+中位数及联合索引相对原生/v3 的耗时比例，区分双样本、合并自比对和全部视图。
+合并视图计时包含新建 GDB，复用原生索引时未实测的构建时间标为空；旧实验不补造计时数据。
+仅比较构建可使用 `--construction-only`：完成全部构建正确性检查后报告 `MEASURED`，
+如实保留联合索引更大的结果，不宣称已通过空间或速度验收。
+本次本地验证记录见 [CMake 构建与计时检查](benchmarks/cmake-build-verification.json)。
 
 以上直接读取你的 FASTA：两个输入自动构建 v4 联合索引并比对；一个输入构建
 v3 独立压缩索引并自比对，也支持 `.fna`、`.fasta` 及其 gzip 文件。

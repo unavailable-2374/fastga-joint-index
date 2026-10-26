@@ -34,6 +34,6 @@ def main():
         for path in directories:
             if path.exists():shutil.rmtree(path)
         (root/'merged.fa').unlink(missing_ok=True);base['cleanup']='Removed generated test indexes, merged FASTA, scratch and frozen build tools; reused native indexes and original inputs were retained.'
-    save(root/'report.json',base);print(json.dumps(dict(status='PASS',storage=base['storage'],performance={x['workload']:x['performance'] for x in reports}),indent=2))
+    save(root/'report.json',base);print(json.dumps(dict(status='PASS',storage=base['storage'],construction=base.get('construction'),performance={x['workload']:x['performance'] for x in reports}),indent=2))
 
 if __name__=='__main__':main()

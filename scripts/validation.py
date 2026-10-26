@@ -12,7 +12,7 @@ def toolchain_hashes(directory):
             if path.is_file() and '__pycache__' not in path.parts and path.suffix!='.pyc'}
 
 class Runner:
-    def __init__(self, root, binpath, *, resume=False):
+    def __init__(self, root, binpath, *, resume=False, pfp_tools=None):
         self.root, self.rows = root, []
         # A run must not silently pick up executables rebuilt during development.
         self.binpath = root / 'toolchain'
@@ -29,8 +29,9 @@ class Runner:
             # Preserve resources when explicitly resuming an older checkpoint;
             # current native builds have no fastga-runtime directory.
             for name in ('fastga-runtime','pfp-tools'):
-                if (binpath/name).is_dir():
-                    shutil.copytree(binpath/name,self.binpath/name,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+                source = Path(pfp_tools) if name == 'pfp-tools' and pfp_tools else binpath/name
+                if source.is_dir():
+                    shutil.copytree(source,self.binpath/name,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
         self.env = dict(os.environ, PATH=str(self.binpath) + os.pathsep + os.environ['PATH'])
 
     def run(self, name, args, env=None, expected_error=None, measure_tree=False, temporary_dir=None):
@@ -75,11 +76,12 @@ class Runner:
             try:
                 _, status, usage = os.wait4(proc.pid, 0)
                 proc.returncode = os.waitstatus_to_exitcode(status)
+                finished = time.monotonic()
             finally:
                 stop.set()
                 if monitor: monitor.join()
         row = dict(name=name, command=list(map(str, args)), exit_code=proc.returncode,
-                   wall_seconds=time.monotonic() - start,
+                   wall_seconds=finished - start,
                    peak_rss_bytes=usage.ru_maxrss * (1 if sys.platform == 'darwin' else 1024),
                    stdout=str(stdout), stderr=str(stderr))
         if measure_tree:
