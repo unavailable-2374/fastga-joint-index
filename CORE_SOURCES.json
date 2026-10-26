@@ -1,0 +1,21 @@
+{
+  "source": "Extracted from the validated FastGA integration; core C/C++ files are unchanged.",
+  "files": {
+    "direct_stream.c": "13daffd8bf78437b52f7386628921b6c8ccd8f28d0dc88946d604672d1f331e2",
+    "direct_stream.h": "989d83b7300df6ead3853f8a7a014ccdfd4ef599c41b6a57178c1e8860152020",
+    "pfp_marks.cpp": "987669c43e664f11360b70eaf8442d4e77578a8804b95ea40a2543d80a1f6a28",
+    "pfp_marks.h": "6fa7ca0cb9df7d7b78a3612c5ef008953f734177f4134e0dc57f25c4df75d2b9",
+    "pfp_meta.hpp": "3cfc331dda8e6f61fcab195ef26b3c27cdb7f925e75b2b768dfdbb55646a7797",
+    "pfp_emit.cpp": "76f70ac7e063b27d85215733daace4f140b0c37d19bf6d684578809d2e0cc13a",
+    "position_codec.hpp": "32364a1e633df5276adcab11146d8eb5698ec081dc7fe7866513f25272208279",
+    "gdb_key_source.hpp": "5d1d732d2a44d7e52574e0d32c3e3bfb12a060468c3986a0ea9f12d0a6ab85c2",
+    "shared_gix.cpp": "c25a7ccd6b13f3b5dcda13784030a5c6aa730a107716623e4c2825a3efcfb8a5",
+    "shared_gix.h": "fc900cea44924ff109e3e23679e6753bb5fbcc80927f93e3679c9cc839ac0c72",
+    "joint_copies.hpp": "2837791f963b551d032c6b0ebfdb6ac8b2655a4033e5a39def9c761a779b2864",
+    "joint_copy.cpp": "6ea991c2a423789f3b8650ee013a460e76e143f2c1c5f7cd5e1573eeea3c5f61",
+    "joint_filter.cpp": "64901cc063006bcdf1437c54672d0ee6e04087146e00fd71f64bd8ce24e8e7a6",
+    "joint_filter.h": "3e8acbca88f66e1c39070f614895489ec3ae25fb9a7905840231898561db3e37",
+    "joint_index.hpp": "86fb63c826f2bf8b99af5f1df89a67836bcee095b7992535f202ee729d2b97da",
+    "joint_pack.hpp": "d897a1b4d503c7ab0cc41e38ae01ed8efef41e2c40b73709a58f5cd2cb65533b"
+  }
+}

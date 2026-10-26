@@ -1,0 +1,213 @@
+{
+  "origin": "Historical observations from the original integration before standalone extraction; numeric data and hashes unchanged. Machine paths, hostnames, SSH details and scheduler IDs are omitted.",
+  "data_kind": "REAL_COMPLETE_INPUTS",
+  "status": "PASS",
+  "dataset": "Complete upstream FastGA HAP example inputs; not a human-genome measurement.",
+  "source_report_sha256": "8c1b96c938033391dbb09a87ea2b7128c5832555003d47485f0ad4114fc6a71a",
+  "inputs": {
+    "HAP1": {
+      "sha256": "35a2a5b0c4f5f7575b7e52f73919c8bc057bc37988850c993a04541b2911f283",
+      "contigs": 1,
+      "bases": 86251610,
+      "ambiguous_bases": 14800,
+      "decompressed_sha256": "6e82054bd1d2dc0e98df0627cb8a1c00dfbd8d1c0d3356b94ca42fa5d5f80700",
+      "filename": "HAP1.fasta.gz"
+    },
+    "HAP2": {
+      "sha256": "0f2e4a412b5268897f8362f69708b99d408662456ce898598870cc30cb14af41",
+      "contigs": 1,
+      "bases": 86746603,
+      "ambiguous_bases": 15000,
+      "decompressed_sha256": "d1433f84d88d04ffed1095e6724a6dd1ddf11039416a9695b5561b8e175fc412",
+      "filename": "HAP2.fasta.gz"
+    }
+  },
+  "storage": {
+    "native_paired_bytes": 1954628728,
+    "native_merged_bytes": 1950117736,
+    "source_independent_paired_bytes": 631931817,
+    "source_merged_bytes": 670157730,
+    "joint_files": {
+      "READY": 17,
+      "HAP1.gix": 12693081,
+      "HAP2.gix": 12702916,
+      "joint.copies": 1367099,
+      "reference.sgr": 248812087,
+      "reference.meta": 2740,
+      "residual.sgr": 180133911,
+      "joint.names": 10,
+      "joint.order": 30970558,
+      "target.meta": 2776
+    },
+    "joint_paired_bytes": 486685195,
+    "joint_all_views_bytes": 500259500,
+    "joint_merged_descriptor_bytes": 13574305,
+    "common_paired_GDB_bytes": 43245010,
+    "common_merged_GDB_bytes": 43244259,
+    "joint_merged_only_bytes": 474863503
+  },
+  "reference_swap_storage": {
+    "native_paired_bytes": 1954628728,
+    "native_merged_bytes": 1950117736,
+    "source_independent_paired_bytes": 631931817,
+    "source_merged_bytes": 670157730,
+    "joint_files": {
+      "READY": 17,
+      "HAP1.gix": 12693081,
+      "HAP2.gix": 12702916,
+      "joint.copies": 1353866,
+      "reference.sgr": 250549144,
+      "reference.meta": 2776,
+      "residual.sgr": 179008970,
+      "joint.names": 10,
+      "joint.order": 30751835,
+      "target.meta": 2740
+    },
+    "joint_paired_bytes": 487065355,
+    "joint_all_views_bytes": 500639660,
+    "joint_merged_descriptor_bytes": 13574305,
+    "common_paired_GDB_bytes": 43245010,
+    "common_merged_GDB_bytes": 43244259,
+    "joint_merged_only_bytes": 475243663
+  },
+  "performance": {
+    "AB": {
+      "seconds": {
+        "native": [
+          18.924122499998703,
+          18.249644792000254,
+          17.306348041998717,
+          19.083147125000323
+        ],
+        "source": [
+          15.079766540999117,
+          14.96855345900076,
+          16.863792916999955,
+          15.256645916000707
+        ],
+        "joint": [
+          18.001164167000752,
+          17.728931915999055,
+          19.016563125000175,
+          17.568055624999033
+        ]
+      },
+      "median_seconds": {
+        "native": 18.586883645999478,
+        "source": 15.168206228499912,
+        "joint": 17.865048041499904
+      },
+      "joint_to_source_ratio": 1.177795697946988
+    },
+    "BA": {
+      "seconds": {
+        "native": [
+          18.85226637500091,
+          19.010279124999215,
+          17.61725900000056,
+          18.733748082999227
+        ],
+        "source": [
+          15.339677707999726,
+          15.04813620799905,
+          15.389410249999855,
+          15.058662041999924
+        ],
+        "joint": [
+          17.556240249999973,
+          17.2588128339994,
+          17.642898542000694,
+          17.106502583001202
+        ]
+      },
+      "median_seconds": {
+        "native": 18.793007229000068,
+        "source": 15.199169874999825,
+        "joint": 17.407526541999687
+      },
+      "joint_to_source_ratio": 1.1452945578713645
+    },
+    "self": {
+      "seconds": {
+        "native": [
+          48.46061474999988,
+          48.6077634580015,
+          48.71064891700007,
+          48.74891112499972
+        ],
+        "source": [
+          50.532240459000604,
+          50.744266666999465,
+          51.586063749999084,
+          50.55652399999963
+        ],
+        "joint": [
+          52.47640154200053,
+          52.735629249998965,
+          53.884003541999846,
+          53.92613229199924
+        ]
+      },
+      "median_seconds": {
+        "native": 48.659206187500786,
+        "source": 50.650395333499546,
+        "joint": 53.309816395999405
+      },
+      "joint_to_source_ratio": 1.0525054354460477
+    }
+  },
+  "complete_seed_pairs": {
+    "AB": 51082720,
+    "BA": 51338519,
+    "self": 215048576
+  },
+  "paf": {
+    "AB": {
+      "records": 323570,
+      "sha256": "7daf3f08c602037a9e52e64eea5bd0c246aa48a6eed5ddc6096bd2d1733cc75d",
+      "accepted_full_alignments": 14
+    },
+    "BA": {
+      "records": 323325,
+      "sha256": "09afca0e8dd0345d8c9f28ed8f48f487cd7713d1231fdcafdd0b41245c600334",
+      "accepted_full_alignments": 14
+    },
+    "self": {
+      "records": 1463498,
+      "sha256": "76de1156f2429b95b47e5da5b3ae3a06d9ceaa42ae625b4ed39e71c882806ea3",
+      "accepted_full_alignments": 14
+    }
+  },
+  "logical_cpus": 12,
+  "threads": 24,
+  "cache_policy": "Uncontrolled OS cache; four rounds alternate backend order; descriptive medians.",
+  "corrected_native_baseline": "Pinned FastGA plus documented sampler, padding, mask and packed-overlap fixes; original inputs unchanged.",
+  "original_cpp_source_archive_sha256": "d0b3bc17719923323fe85a36e0024c01da69fe4b1c62619abd98fb90d5608737",
+  "timing_replacement": {
+    "round": 3,
+    "reason": "Known local source-packaging process overlapped one source-backend timing; the entire three-backend round was replaced on the same host/allocation, retaining all original observations.",
+    "excluded_observations": [
+      {
+        "wall_seconds": 53.526329875001466,
+        "storage": "joint",
+        "pass_number": 3,
+        "records": 1463498,
+        "sha256": "76de1156f2429b95b47e5da5b3ae3a06d9ceaa42ae625b4ed39e71c882806ea3"
+      },
+      {
+        "wall_seconds": 50.94608166599937,
+        "storage": "source",
+        "pass_number": 3,
+        "records": 1463498,
+        "sha256": "76de1156f2429b95b47e5da5b3ae3a06d9ceaa42ae625b4ed39e71c882806ea3"
+      },
+      {
+        "wall_seconds": 49.0081795419992,
+        "storage": "native",
+        "pass_number": 3,
+        "records": 1463498,
+        "sha256": "76de1156f2429b95b47e5da5b3ae3a06d9ceaa42ae625b4ed39e71c882806ea3"
+      }
+    ]
+  }
+}

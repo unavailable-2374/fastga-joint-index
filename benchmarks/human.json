@@ -1,0 +1,236 @@
+{
+  "origin": "Historical observations from the original integration before standalone extraction; numeric data and hashes unchanged. Machine paths, hostnames, SSH details and scheduler IDs are omitted.",
+  "data_kind": "REAL_COMPLETE_INPUTS",
+  "status": "INDEX_VALIDATION_PASS_ALIGNMENTS_STOPPED_BY_USER",
+  "dataset": "HG002 and HG005 paternal f1 assembly v2 GenBank FASTA, HPRC Year 1",
+  "source_manifest": {
+    "dataset_kind": "REAL_HUMAN_ASSEMBLIES",
+    "source": "https://github.com/human-pangenomics/HPP_Year1_Assemblies",
+    "index_url": "https://raw.githubusercontent.com/human-pangenomics/HPP_Year1_Assemblies/main/assembly_index/Year1_assemblies_v2_genbank.index",
+    "index_sha256": "591e2cbfc85fd7bcb577c6bc9975251031932fbd56062d274511fb2a51695bd8",
+    "selection": "Two distinct individuals, complete paternal assemblies, HPRC Year 1 Freeze 1 v2 GenBank release. No subsampling.",
+    "samples": [
+      {
+        "sample": "HG002",
+        "haplotype": "paternal",
+        "filename": "HG002.paternal.f1_assembly_v2_genbank.fa.gz",
+        "url": "https://human-pangenomics.s3.amazonaws.com/working/HPRC_PLUS/HG002/assemblies/year1_f1_assembly_v2_genbank/HG002.paternal.f1_assembly_v2_genbank.fa.gz",
+        "published_sha256": "ec46feb51b343f030aae3e7c4781463a36f059a031f4aacef864a9863d4fc986"
+      },
+      {
+        "sample": "HG005",
+        "haplotype": "paternal",
+        "filename": "HG005.paternal.f1_assembly_v2_genbank.fa.gz",
+        "url": "https://human-pangenomics.s3.amazonaws.com/working/HPRC_PLUS/HG005/assemblies/year1_f1_assembly_v2_genbank/HG005.paternal.f1_assembly_v2_genbank.fa.gz",
+        "published_sha256": "399e1bb4bf40f6b70152acd6f4cc8502fd50d0edef774d9af7ea1add1982c5e6"
+      }
+    ]
+  },
+  "private_source_report_sha256": "b85bc0c0ba8b8ff077529176d94c8997d9df7605b96a2b32f8b31820e3601a65",
+  "inputs": {
+    "HG002": {
+      "sha256": "ec46feb51b343f030aae3e7c4781463a36f059a031f4aacef864a9863d4fc986",
+      "contigs": 610,
+      "bases": 2958633312,
+      "ambiguous_bases": 256,
+      "decompressed_sha256": "cf82158dd23a5c23a5738e9083b544b02d9446bdd0044e6447ad8e00ef6268d8",
+      "filename": "HG002.paternal.f1_assembly_v2_genbank.fa.gz"
+    },
+    "HG005": {
+      "sha256": "399e1bb4bf40f6b70152acd6f4cc8502fd50d0edef774d9af7ea1add1982c5e6",
+      "contigs": 682,
+      "bases": 2937775295,
+      "ambiguous_bases": 131,
+      "decompressed_sha256": "22c6d030cd9068d72dd70b1bb640ed578fcda7ad9c26c4d6372106c1dcb5db8c",
+      "filename": "HG005.paternal.f1_assembly_v2_genbank.fa.gz"
+    }
+  },
+  "storage": {
+    "native_paired_bytes": 65703524445,
+    "native_merged_bytes": 65569306569,
+    "source_independent_paired_bytes": 23121246160,
+    "source_merged_bytes": 23022814790,
+    "joint_files": {
+      "reference.meta": 22180,
+      "joint.order": 418987805,
+      "joint.names": 12,
+      "HG002.gix": 18542889,
+      "HG005.gix": 18540482,
+      "READY": 17,
+      "joint.copies": 22401502,
+      "target.meta": 24664,
+      "reference.sgr": 10388683701,
+      "residual.sgr": 892395127
+    },
+    "joint_paired_bytes": 11759598379,
+    "joint_all_views_bytes": 11779036872,
+    "joint_merged_descriptor_bytes": 19438493,
+    "common_paired_GDB_bytes": 1474146310,
+    "common_merged_GDB_bytes": 1474153162,
+    "joint_merged_only_bytes": 11741953501
+  },
+  "reference_swap_storage": {
+    "native_paired_bytes": 65703524445,
+    "native_merged_bytes": 65569306569,
+    "source_independent_paired_bytes": 23121246160,
+    "source_merged_bytes": 23022814790,
+    "joint_files": {
+      "READY": 17,
+      "joint.copies": 22578681,
+      "joint.order": 417308096,
+      "reference.sgr": 10279120911,
+      "reference.meta": 24664,
+      "target.meta": 22180,
+      "residual.sgr": 935335828,
+      "joint.names": 12,
+      "HG005.gix": 18540482,
+      "HG002.gix": 18542889
+    },
+    "joint_paired_bytes": 11691473760,
+    "joint_all_views_bytes": 11710912253,
+    "joint_merged_descriptor_bytes": 19438493,
+    "common_paired_GDB_bytes": 1474146310,
+    "common_merged_GDB_bytes": 1474153162,
+    "joint_merged_only_bytes": 11673828882
+  },
+  "complete_index_checks": [
+    {
+      "storage": "source",
+      "sample": "HG002",
+      "exact_rows_verified": 2189138015,
+      "status": "PASS"
+    },
+    {
+      "storage": "source",
+      "sample": "HG005",
+      "exact_rows_verified": 2173200872,
+      "status": "PASS"
+    },
+    {
+      "storage": "source",
+      "sample": "merged",
+      "exact_rows_verified": 4362338887,
+      "status": "PASS"
+    },
+    {
+      "storage": "joint",
+      "sample": "HG002",
+      "exact_rows_verified": 2189138015,
+      "status": "PASS",
+      "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+    },
+    {
+      "storage": "joint",
+      "sample": "HG005",
+      "exact_rows_verified": 2173200872,
+      "status": "PASS",
+      "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+    },
+    {
+      "storage": "joint",
+      "sample": "merged",
+      "exact_rows_verified": 4362338887,
+      "status": "PASS",
+      "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+    }
+  ],
+  "reference_swap_checks": [
+    {
+      "storage": "source",
+      "sample": "HG005",
+      "exact_rows_verified": 2173200872,
+      "status": "PASS"
+    },
+    {
+      "storage": "source",
+      "sample": "HG002",
+      "exact_rows_verified": 2189138015,
+      "status": "PASS"
+    },
+    {
+      "storage": "source",
+      "sample": "merged",
+      "exact_rows_verified": 4362338887,
+      "status": "PASS"
+    },
+    {
+      "storage": "joint",
+      "sample": "HG005",
+      "exact_rows_verified": 2173200872,
+      "status": "PASS",
+      "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+    },
+    {
+      "storage": "joint",
+      "sample": "HG002",
+      "exact_rows_verified": 2189138015,
+      "status": "PASS",
+      "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+    },
+    {
+      "storage": "joint",
+      "sample": "merged",
+      "exact_rows_verified": 4362338887,
+      "status": "PASS",
+      "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+    }
+  ],
+  "stopped_at": "2026-10-25T17:27:54.484815+00:00",
+  "threads": 24,
+  "limitations": [
+    "Merged self-alignment was stopped during the native baseline and did not produce a complete PAF equality result.",
+    "Four-round timing comparisons were not completed; no accepted human speed median is available."
+  ],
+  "directional_controls": {
+    "AB": {
+      "status": "PASS",
+      "complete_seed_pairs": {
+        "status": "PASS",
+        "exact_seed_pairs": 1175450923,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      "alignments": [
+        {
+          "wall_seconds": 9629.315501909703,
+          "storage": "native",
+          "pass_number": -1,
+          "records": 492284,
+          "sha256": "a9af1c9a68de98347c9b40bd5737a392d7d3a2879f404cdd7838d80428428779"
+        },
+        {
+          "wall_seconds": 10003.929942484945,
+          "storage": "joint",
+          "pass_number": -1,
+          "records": 492284,
+          "sha256": "a9af1c9a68de98347c9b40bd5737a392d7d3a2879f404cdd7838d80428428779"
+        }
+      ],
+      "timing_scope": "Single full correctness-control run with seed auditing, not four-round timing medians."
+    },
+    "BA": {
+      "status": "PASS",
+      "complete_seed_pairs": {
+        "status": "PASS",
+        "exact_seed_pairs": 1172621278,
+        "comparison": "complete length/orientation/contig/position multisets; bounded-memory external sort"
+      },
+      "alignments": [
+        {
+          "wall_seconds": 6571.351064473391,
+          "storage": "native",
+          "pass_number": -1,
+          "records": 472831,
+          "sha256": "daa9d30d08feeeeba8f57da6b47b0ca55e715097cd575fccc75d456cbfa6c875"
+        },
+        {
+          "wall_seconds": 6722.27947710827,
+          "storage": "joint",
+          "pass_number": -1,
+          "records": 472831,
+          "sha256": "daa9d30d08feeeeba8f57da6b47b0ca55e715097cd575fccc75d456cbfa6c875"
+        }
+      ],
+      "timing_scope": "Single full correctness-control run with seed auditing, not four-round timing medians."
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "repository": "https://github.com/IlyaGrebnov/libsais",
+  "revision": "c284ba843dd16c159acb976f17bc19382793ea75",
+  "archive_sha256": "2f22d0bf88c037eb82ceb7a2592c2805f514d1c6fe32b991bc0dc17c959895a7",
+  "files": {
+    "src/libsais.c": "aa84f63278f7cb401196a1a795c03d4d96be8b571d72b6b0901425e781ad1508",
+    "src/libsais64.c": "088019c5fc5648284291f96657d0cfd2c3c9bf53a4d12514773fdab7f3e452bf",
+    "include/libsais.h": "a18b46efcd632491acfcc696606b5455a6c8cc0b014ebd67ae29cfabba20774a",
+    "include/libsais64.h": "3798e288e124036e43edeb0cdb27fe6bffa4eb8d71b6cf805c41f799e20965d2",
+    "LICENSE": "e4abf9cd071e2e784ff04751fdf566ec4f1fe339bbef8bdcf6f56133f609a516",
+    "VERSION": "6d83386e2438a41efc82d6b4018bf4aaa95b0ccc405ba835d779ff08a31bac80"
+  }
+}

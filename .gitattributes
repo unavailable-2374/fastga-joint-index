@@ -1,0 +1,5 @@
+* text=auto eol=lf
+# Checksum-locked inputs must retain their original bytes on every checkout.
+/vendor/** -text
+/src/** -text
+/patches/** -text

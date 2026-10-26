@@ -1,0 +1,18 @@
+--- a/bwtparse.c
++++ b/bwtparse.c
+@@ -276,11 +276,13 @@ int main(int argc, char *argv[])
+ 
+   // transform SA->BWT inplace and write remapped last array, and possibly sainfo
+   sa_index_t *BWTsa = SA; // BWT overlapping SA
+-  assert(n>1);
++  assert(n>0);
+   // first BWT symbol
+   assert(SA[0]==n);
+   BWTsa[0] = Text[n-1];
+-  if(fputc(last[n-2],lastout)==EOF) die("bwlast output 1");
++  // With one phrase, its final content character precedes the empty suffix.
++  // There is no penultimate phrase, and last[n-2] would read before the array.
++  if(fputc(last[n==1 ? 0 : n-2],lastout)==EOF) die("bwlast output 1");
+   if(arg.SAinfo) get_and_write_myint(sa_info,n,n-1,sa_out); // ending position+1 of Text[n-1] in original text T (is |T|+w) 
+   // 2nd, 3rd etc BWT symbols 
+   for(long i=1;i<=n;i++) {

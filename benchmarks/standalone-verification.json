@@ -1,0 +1,53 @@
+{
+  "status": "PASS",
+  "data_kind": "SIMULATED_TEST_DATA_ONLY",
+  "scope": "Actual local build and correctness checks after standalone extraction; no biological performance claim.",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "architecture": "arm64",
+  "python_version": "3.14.6",
+  "cmake_version": "cmake version 4.0.2",
+  "compiler_versions": [
+    "Apple clang version 21.0.0 (clang-2100.3.34.2)"
+  ],
+  "normal_ctest_cases": 3,
+  "fixture_checks": 212,
+  "fixture_threads": 4,
+  "codec": {
+    "status": "PASS",
+    "kind": "SIMULATED_CODEC_TEST",
+    "independent_wire_oracles": 1,
+    "roundtrip_rows": 258056,
+    "scalar_lcp_oracle_pairs": 5248,
+    "external_sort_rows": 10000,
+    "expected_rejections": 16
+  },
+  "merge_fasta": {
+    "kind": "TEST_SIMULATED_FASTA_SERIALIZATION",
+    "status": "PASS",
+    "chunk_boundary_cases": 128
+  },
+  "documented_cli_smoke": {
+    "status": "PASS",
+    "kind": "SIMULATED_CLI_SMOKE_TEST",
+    "commands": [
+      "python3.14",
+      "python3.14",
+      "FAtoGDB",
+      "gixshare",
+      "FastGA-shared",
+      "GIXmake",
+      "FastGA-baseline"
+    ],
+    "paf_records": 2,
+    "scope": "Documented FASTA construction, separate FAtoGDB merged view and self-alignment commands; exact complete native PAF equality"
+  },
+  "sanitized_runtime": {
+    "status": "PASS",
+    "checks": 12,
+    "scope": "FastGA.c and shared_gix.cpp ASAN/UBSAN; linked upstream support objects uninstrumented; leak detector disabled",
+    "instrumented_sha256": "138b572b2792d3c203b2f25cd0884fc5d09a8ea0e69a6cea4870ddd5ee42bf87"
+  },
+  "core_source_identity": "PASS: all 16 C/C++ source/header files are byte-identical to the validated integration",
+  "github_ci": "CONFIGURED_NOT_EXECUTED_NO_REMOTE",
+  "linux_standalone_build": "NOT_EXECUTED_LOCALLY; original integration core was tested on Linux and the standalone workflow includes Linux"
+}
