@@ -19,8 +19,8 @@ complete FASTA lengths, native parameters, all persistent index components and
 actual command outcomes. Native/v3/joint outputs are fully compared; equality is
 not inferred from record counts or from sampled alignments.
 
-The frozen toolchain includes the FASTA launcher, `FastGA-shared-core`, nested
-runtime scripts and PFP tools. Recursive hashes bind these files together across
+The frozen toolchain includes the C++ FASTA entry point, `FastGA-shared-core`,
+native construction helpers and PFP tools. Recursive hashes bind these files together across
 initial execution, checkpoint adoption and timing replacement. The one-command
 FASTA entry point includes construction time; the `.gix` benchmark commands
 measure alignment with the entry-point startup included.
@@ -88,7 +88,7 @@ comparison. Indexes, GDBs and BPS files must remain immutable during reads.
 ```sh
 ctest --test-dir build --output-on-failure
 python3 scripts/build.py --output build-sanitized --sanitize-adapter --jobs 4
-ctest --test-dir build-sanitized -R 'codec|sanitized-runtime' --output-on-failure
+ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|sanitized-runtime' --output-on-failure
 ```
 
 CTest's generated data are explicitly labelled SIMULATED, and temporary fixture

@@ -32,7 +32,8 @@ def main():
                   source_sha256={f.name: digest(f) for f in sources.glob('*.[ch]')},
                   adapter_sha256={f.name: digest(f) for f in (ROOT / 'src').iterdir() if f.is_file()},
                   frontend_sha256={name: digest(build / name) for name in
-                                   ('FastGA-shared', 'FastGA-shared-core', 'fastga-runtime/fasta_index.py')},
+                                   ('FastGA-shared', 'FastGA-shared-core')},
+                  runtime=dict(frontend='C++17', python_required=False),
                   patch_sha256={f.name: digest(f) for f in (ROOT / 'patches').glob('*.patch')}, commands=commands)
     (build / 'build.json').write_text(json.dumps(report, indent=2) + '\n')
     bwt = json.loads((ROOT / 'vendor/bigbwt/UPSTREAM.json').read_text())

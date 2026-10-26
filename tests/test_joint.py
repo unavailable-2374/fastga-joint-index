@@ -22,17 +22,18 @@ def main():
     p.add_argument('--report',type=Path,required=True)
     p.add_argument('--threads',type=int,default=24)
     a=p.parse_args();a.bin=a.bin.resolve();a.pfp_tools=a.pfp_tools.resolve()
-    report=dict(status='RUNNING',kind='SIMULATED TEST ONLY; no real-data performance claims',threads=a.threads,checks=[],commands=[],runner_sha256=digest(Path(__file__)),executables={n:digest(a.bin/n) for n in ('FastGA-baseline','FastGA-shared','gixshare','joint-copy')})
+    report=dict(status='RUNNING',kind='SIMULATED TEST ONLY; no real-data performance claims',threads=a.threads,checks=[],commands=[],runner_sha256=digest(Path(__file__)),executables={n:digest(a.bin/n) for n in ('FastGA-baseline','FastGA-shared','FastGA-shared-core','gixshare','joint-copy')})
     def save():a.report.write_text(json.dumps(report,indent=2)+'\n')
     with tempfile.TemporaryDirectory(prefix='sxgc-joint-SIMULATED-TEST-') as directory:
         root=Path(directory);tools=root/'toolchain';tools.mkdir()
         for name in ('GIXmake','GIXmake-direct','GIXmake-marks','pfp-emit','joint-copy','gixshare','FastGA-baseline','FastGA-shared','FastGA-shared-core','FAtoGDB','ALNtoPAF','build.json'):shutil.copyfile(a.bin/name,tools/name);shutil.copymode(a.bin/name,tools/name)
+        shutil.copytree(a.pfp_tools,tools/'pfp-tools');a.pfp_tools=tools/'pfp-tools'
         a.bin=tools
         for name,sha in report['executables'].items():
             if digest(a.bin/name)!=sha:raise RuntimeError('frozen TEST executable differs: '+name)
         env=dict(os.environ,PATH=str(a.bin)+os.pathsep+os.environ['PATH']);scratch=root/'scratch';scratch.mkdir();env['SXGC_VERIFY_TMPDIR']=str(scratch)
-        def run(name,cmd,error=None,extra=None):
-            start=time.monotonic();result=subprocess.run(list(map(str,cmd)),env=dict(env,**(extra or {})),capture_output=True)
+        def run(name,cmd,error=None,extra=None,cwd=None):
+            start=time.monotonic();result=subprocess.run(list(map(str,cmd)),env=dict(env,**(extra or {})),capture_output=True,cwd=cwd)
             row=dict(name=name,command=list(map(str,cmd)),exit_code=result.returncode,wall_seconds=time.monotonic()-start)
             report['commands'].append(row)
             if error:
@@ -58,9 +59,21 @@ def main():
             for name,sequences in [('A',asq),('B',bsq)]:
                 fasta=work/(name+'.fa');fasta.write_text(''.join(f'>TEST_SIMULATED_{i}\n{s}\n' for i,s in enumerate(sequences)))
                 run(case+'-native-'+name,[a.bin/'GIXmake',f'-T{a.threads}','-k40','-P'+str(scratch),fasta,native/name]+(['#'] if masked[name] else []))
+            # Exercise the C++ constructor itself on every edge-case collection,
+            # separately from the independent Python construction path below.
+            audits=[work/'native-front.seeds',work/'shared-front.seeds']
+            expected=run(case+'-front-native',[a.bin/'FastGA-baseline',f'-T{a.threads}','-pafx','-P'+str(scratch),native/'A.gix',native/'B.gix'],extra={'SXGC_SEED_AUDIT':str(audits[0])})
+            observed=run(case+'-front-CXX',[a.bin/'FastGA-shared','-k',f'-T{a.threads}','-pafx','-P'+str(scratch),work/'A.fa',work/'B.fa'],extra={'SXGC_SEED_AUDIT':str(audits[1])},cwd=work)
+            if sorted(expected.splitlines())!=sorted(observed.splitlines()):raise RuntimeError('complete C++ entry-point TEST PAF mismatch: '+case)
+            bundle=next((work/'.fastga-shared').glob('*/index'))
+            for name in ('A','B'):
+                checked=json.loads(run(case+'-front-records-'+name,[a.bin/'gixshare','verify-equivalent',native/(name+'.gix'),bundle/(name+'.gix')]))
+                report['checks'].append(dict(case=case,backend='native-cpp',sample=name,**checked))
+            seed=json.loads(run(case+'-front-seeds',[a.bin/'gixshare','compare-seeds',native/'A.gix',native/'B.gix',audits[0],bundle/'A.gix',bundle/'B.gix',audits[1]]))
+            report['checks'].append(dict(case=case,backend='native-cpp',check='complete-seeds-and-PAF',status='PASS',paf_records=len(observed.splitlines()),exact_seed_pairs=seed['exact_seed_pairs']))
             for backend in (('native','pfp') if case in ('identical','complex','unrelated') else ('native',)):
                 joint=work/('joint-'+backend)
-                run(case+'-'+backend+'-build',[sys.executable,HERE/'fasta_index.py','--storage','joint','--reference','A','--backend',backend,'--bin',a.bin,'--pfp-tools',a.pfp_tools,'--threads',a.threads,'--input','A='+str(work/'A.fa'),'--input','B='+str(work/'B.fa'),'--output',joint]+[arg for name in ('A','B') if masked[name] for arg in ('--implicit-mask',name)])
+                run(case+'-'+backend+'-build',[sys.executable,HERE/'fasta_index.py','--storage','joint','--reference','A','--backend',backend,'--bin',a.bin,'--pfp-tools',a.pfp_tools,'--threads',a.threads,'--input','A='+str(work/'A.fa'),'--input','B='+str(work/'B.fa'),'--output',joint,'--implicit-mask','A','--implicit-mask','B'])
                 for name in ('A','B'):
                     checked=json.loads(run(case+'-'+backend+'-records-'+name,[a.bin/'gixshare','verify-equivalent',native/(name+'.gix'),joint/(name+'.gix')]))
                     report['checks'].append(dict(case=case,backend=backend,sample=name,**checked))

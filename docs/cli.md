@@ -1,5 +1,10 @@
 # FASTA entry point
 
+The entry point and automatic constructor are C++17. Runtime dispatch, hashing,
+cache locking, process supervision and construction invoke native tools directly.
+They require no Python interpreter or runtime script. Python is used only by
+build/test utilities and the separate optional construction/benchmark scripts.
+
 ```sh
 FastGA-shared -T24 -pafx A.fa B.fa > A_B.paf
 FastGA-shared -T24 -pafx A.fa > A.paf
@@ -40,8 +45,9 @@ are checked again after successful alignment.
 `-1:<path>` implicitly retains the bundle even without `-k`, because the emitted
 1-code alignment needs its GDB/BPS files for later conversion. Keep this bundle
 while using the alignment. PAF/PSL output is self-contained. The build directory
-contains the `FastGA-shared` Python launcher, `FastGA-shared-core`, native helper
-programs, `fastga-runtime/fasta_index.py`, and `pfp-tools/`; move them together.
+contains the native `FastGA-shared` entry point, `FastGA-shared-core`, helper
+programs and `pfp-tools/`; move them together. Earlier Python-entry-point caches
+remain untouched; the native constructor uses a new cache identity/schema.
 
 The first call includes index construction and alignment. Historical benchmark
 alignment-only times must not be compared with this combined wall time.
@@ -76,4 +82,9 @@ and retained joint indexes against full decoded native records and complete
 seed-pair multisets. It also exercises temporary cleanup, low thread budgets,
 mixed inputs, gzip and spaced paths, concurrent cache creation, content changes,
 later conversion of 1-code output, and expected constructor/input failures.
+Additional checks run a copied native-only tool bundle with no Python in PATH,
+compare native SHA-256 with an independent hashlib oracle, and interrupt a real
+native helper to verify child and scratch cleanup. The edge-case index suite
+also runs the C++ constructor on every collection, independently of the original
+Python constructor.
 These are correctness checks, not biological performance measurements.

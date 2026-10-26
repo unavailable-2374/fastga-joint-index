@@ -2,13 +2,17 @@
 """SIMULATED TEST DATA: real end-to-end FASTA entry-point correctness checks."""
 import argparse
 import gzip
+import hashlib
 import json
 import os
 from pathlib import Path
 import random
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from validation import Runner, toolchain_hashes
@@ -137,6 +141,12 @@ def main():
                 raise RuntimeError('expected exactly one retained index')
             bundle = entries[0]/'index'
             before = (bundle/'build.json').read_bytes(), (bundle/'build.json').stat().st_mtime_ns
+            config = json.loads((entries[0]/'cache.json').read_text())
+            for source in config['inputs']:
+                with Path(source['path']).open('rb') as stream:
+                    if source['sha256'] != hashlib.file_digest(stream, 'sha256').hexdigest():
+                        raise RuntimeError('native SHA256 differs from independent Python hashlib')
+            report['checks'].append(dict(check='native-SHA256-independent-oracle', status='PASS'))
             compare('retained-cache-reuse', command, expected, cwd=cached)
             if before != ((bundle/'build.json').read_bytes(), (bundle/'build.json').stat().st_mtime_ns):
                 raise RuntimeError('cache reuse rebuilt an unchanged index')
@@ -206,7 +216,7 @@ def main():
             frozen.mkdir()
             runner = Runner(frozen, binary)
             hashes = toolchain_hashes(runner.binpath)
-            for resource in ('FastGA-shared', 'FastGA-shared-core', 'fastga-runtime/fasta_index.py', 'pfp-tools/build.json'):
+            for resource in ('FastGA-shared', 'FastGA-shared-core', 'pfp-tools/newscan', 'pfp-tools/build.json'):
                 if resource not in hashes:
                     raise RuntimeError('frozen benchmark toolchain omitted resource: '+resource)
             for label, paths in [('GIX', [native/'A.gix', native/'B.gix']), ('FASTA', inputs)]:
@@ -214,6 +224,77 @@ def main():
                 if sorted(output.read_bytes().splitlines()) != sorted(paf.splitlines()):
                     raise RuntimeError('frozen benchmark toolchain output mismatch: '+label)
                 report['checks'].append(dict(check='frozen-benchmark-toolchain-'+label, status='PASS'))
+
+            # Copy only native executables/resources. No Python launcher, runtime
+            # script, shell wrapper or source checkout is available in this bundle.
+            standalone=root/'native-only'
+            standalone.mkdir()
+            for name in ('FastGA-shared','FastGA-shared-core','FAtoGDB','GIXmake-direct','GIXmake-marks',
+                         'gixshare','joint-copy','pfp-emit','ALNtoPAF','ALNtoPSL'):
+                shutil.copy2(binary/name,standalone/name)
+            shutil.copytree(binary/'pfp-tools',standalone/'pfp-tools')
+            restricted=dict(env,PATH=str(standalone))
+            if shutil.which('python3',path=restricted['PATH']) is not None or (standalone/'fastga-runtime').exists():
+                raise RuntimeError('native-only TEST bundle contains a Python runtime')
+            magic=(standalone/'FastGA-shared').read_bytes()[:4]
+            if magic not in (b'\x7fELF',b'\xcf\xfa\xed\xfe',b'\xfe\xed\xfa\xcf',b'\xca\xfe\xba\xbe'):
+                raise RuntimeError('FastGA-shared is not a native executable')
+            for label, paths, expected_output in [('pair',inputs,paf),('self',[inputs[0]],self_paf),('gzip',zipped,paf)]:
+                result=subprocess.run([str(standalone/'FastGA-shared'),'-T24','-pafx',*map(str,paths)],
+                                      cwd=root,env=restricted,capture_output=True)
+                if result.returncode:
+                    raise RuntimeError('Program FastGA-shared failed with: '+result.stderr.decode(errors='replace'))
+                if sorted(result.stdout.splitlines())!=sorted(expected_output.splitlines()):
+                    raise RuntimeError('complete native-only TEST PAF mismatch: '+label)
+                report['checks'].append(dict(check='no-Python-on-PATH-'+label,status='PASS'))
+
+            # Interrupt a real native helper on explicit SIMULATED TEST input.
+            # Verify both process cancellation and private scratch cleanup.
+            interrupted=root/'interrupted'
+            interrupted.mkdir()
+            large=interrupted/'SIMULATED_interrupt.fa'
+            with large.open('w') as stream:
+                for _ in range(1024):stream.write(texts[0])
+            child=subprocess.Popen([str(standalone/'FastGA-shared'),'-T1','-pafx','-P'+str(interrupted),str(large)],
+                                   cwd=root,env=restricted,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            live=[]
+            try:
+                diagnostics=[]
+                while True:
+                    line=child.stderr.readline()
+                    diagnostics.append(line)
+                    if line.startswith(b'FastGA-shared: building source index'):break
+                    if not line:
+                        raise RuntimeError('Program FastGA-shared failed with: '+b''.join(diagnostics).decode(errors='replace'))
+                deadline=time.monotonic()+5
+                while time.monotonic()<deadline and child.poll() is None and not live:
+                    for manifest in interrupted.glob('.fastga-shared-*/index.build-logs/build.json'):
+                        try:
+                            commands=json.loads(manifest.read_text())['commands']
+                        except (OSError,json.JSONDecodeError):continue
+                        for row in commands:
+                            if 'exit_code' in row:continue
+                            try:os.kill(row['pid'],0)
+                            except ProcessLookupError:continue
+                            live.append(row['pid'])
+                    if not live:time.sleep(.005)
+                if not live:raise RuntimeError('SIMULATED interruption test did not observe a live native helper')
+                child.send_signal(signal.SIGTERM)
+                out,err=child.communicate(timeout=15)
+                if child.returncode!=128+signal.SIGTERM or out:
+                    raise RuntimeError('native interruption status/output mismatch: '+str(child.returncode)+' '+err.decode(errors='replace'))
+                for pid in live:
+                    try:os.kill(pid,0)
+                    except ProcessLookupError:continue
+                    raise RuntimeError('interrupted native helper survived parent cleanup')
+                if list(interrupted.glob('.fastga-*')) or list(interrupted.glob('fastga-direct-*')):
+                    raise RuntimeError('native scratch survived interruption')
+            finally:
+                if child.poll() is None:
+                    child.terminate()
+                    try:child.communicate(timeout=15)
+                    except subprocess.TimeoutExpired:child.kill();child.communicate()
+            report['checks'].append(dict(check='native-SIGTERM-child-and-scratch-cleanup',status='PASS'))
             report['status'] = 'PASS'
     except BaseException as error:
         report.update(status='FAILED', error=str(error))

@@ -29,6 +29,7 @@ def main():
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     verify('libsais', 'PROVENANCE.json')
+    verify('nlohmann-json', 'UPSTREAM.json')
     for name, patch in [('fastga', 'fastga.patch'), ('bigbwt', 'bigbwt.patch')]:
         source, manifest = verify(name, 'UPSTREAM.json')
         output = a.output / name

@@ -60,15 +60,18 @@ foreach(target gene alignment annotations rsd msd fastk_native fastk_shared)
 endforeach()
 add_executable(FastGA-baseline "${FG}/FastGA.c" $<TARGET_OBJECTS:fastk_native>
   $<TARGET_OBJECTS:gene> $<TARGET_OBJECTS:alignment> $<TARGET_OBJECTS:rsd>)
-add_executable(FastGA-shared "${FG}/FastGA.c" "${SRC}/shared_gix.cpp" $<TARGET_OBJECTS:fastk_shared>
+add_executable(FastGA-shared-core "${FG}/FastGA.c" "${SRC}/shared_gix.cpp" $<TARGET_OBJECTS:fastk_shared>
   $<TARGET_OBJECTS:gene> $<TARGET_OBJECTS:alignment> $<TARGET_OBJECTS:rsd>)
-target_compile_definitions(FastGA-shared PRIVATE SXGC_SHARED_GIX)
-set_target_properties(FastGA-shared PROPERTIES OUTPUT_NAME FastGA-shared-core)
-# Keep the validated alignment driver intact behind a FASTA-aware entry point.
-configure_file(scripts/fastga_shared.py "${CMAKE_BINARY_DIR}/FastGA-shared" COPYONLY)
-file(CHMOD "${CMAKE_BINARY_DIR}/FastGA-shared"
-  PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
-configure_file(scripts/fasta_index.py "${CMAKE_BINARY_DIR}/fastga-runtime/fasta_index.py" COPYONLY)
+target_compile_definitions(FastGA-shared-core PRIVATE SXGC_SHARED_GIX)
+add_executable(FastGA-shared "${SRC}/fastga_frontend.cpp")
+target_include_directories(FastGA-shared PRIVATE "${PROJECT_SOURCE_DIR}/vendor/nlohmann-json/include")
+target_link_libraries(FastGA-shared PRIVATE Threads::Threads)
+if(NOT APPLE)
+  find_package(OpenSSL 1.1 REQUIRED COMPONENTS Crypto)
+  target_link_libraries(FastGA-shared PRIVATE OpenSSL::Crypto)
+endif()
+# Remove the obsolete generated Python runtime from earlier builds.
+file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/fastga-runtime")
 add_executable(GIXmake "${FG}/GIXmake.c" $<TARGET_OBJECTS:msd> $<TARGET_OBJECTS:annotations>
   $<TARGET_OBJECTS:gene> $<TARGET_OBJECTS:fastk_native>)
 target_compile_definitions(GIXmake PRIVATE LCPs)
@@ -84,7 +87,7 @@ add_executable(ALNtoPSL "${FG}/ALNtoPSL.c" $<TARGET_OBJECTS:gene> $<TARGET_OBJEC
 add_executable(gixshare "${SRC}/shared_gix.cpp" $<TARGET_OBJECTS:fastk_native> $<TARGET_OBJECTS:gene>)
 target_compile_definitions(gixshare PRIVATE SXGC_PACK_MAIN)
 add_executable(pfp-emit "${SRC}/pfp_emit.cpp" $<TARGET_OBJECTS:fastk_native> $<TARGET_OBJECTS:gene>)
-foreach(target FastGA-baseline FastGA-shared GIXmake GIXmake-direct GIXmake-marks FAtoGDB ALNtoPAF ALNtoPSL gixshare pfp-emit)
+foreach(target FastGA-baseline FastGA-shared-core GIXmake GIXmake-direct GIXmake-marks FAtoGDB ALNtoPAF ALNtoPSL gixshare pfp-emit)
   sj_program(${target})
 endforeach()
 add_library(joint_sais OBJECT "${PROJECT_SOURCE_DIR}/vendor/libsais/src/libsais.c"
@@ -137,7 +140,7 @@ if(BUILD_TESTING)
     ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0;UBSAN_OPTIONS=halt_on_error=1")
 endif()
 if(SJ_SANITIZE_ADAPTER)
-  foreach(target FastGA-shared gixshare joint-codec-test)
+  foreach(target FastGA-shared FastGA-shared-core gixshare joint-codec-test)
     if(TARGET ${target})
       target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
       target_link_options(${target} PRIVATE -fsanitize=address,undefined)
@@ -145,7 +148,7 @@ if(SJ_SANITIZE_ADAPTER)
   endforeach()
   if(BUILD_TESTING)
     add_test(NAME sanitized-runtime COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_runtime.py"
-      --bin "${CMAKE_BINARY_DIR}" --instrumented "$<TARGET_FILE:FastGA-shared>"
+      --bin "${CMAKE_BINARY_DIR}" --instrumented "$<TARGET_FILE:FastGA-shared-core>"
       --report "${CMAKE_BINARY_DIR}/test-results/runtime.json")
   endif()
 endif()
@@ -153,6 +156,6 @@ add_custom_target(provenance ALL
   COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/write_manifest.py"
     --build "${CMAKE_BINARY_DIR}" --compiler "${CMAKE_C_COMPILER}" --cxx "${CMAKE_CXX_COMPILER}"
     --openmp "$<BOOL:${SJ_ENABLE_OPENMP}>"
-  DEPENDS FastGA-baseline FastGA-shared GIXmake GIXmake-direct GIXmake-marks
+  DEPENDS FastGA-baseline FastGA-shared FastGA-shared-core GIXmake GIXmake-direct GIXmake-marks
     FAtoGDB ALNtoPAF ALNtoPSL gixshare pfp-emit joint-copy newscan bwtparse pfbwt
   VERBATIM)

@@ -5,6 +5,7 @@
 | FastGA | `178afcbba2f79abc1686e3bd2b8a916969467e83` | Sampling, GDB, chaining, local alignment and output |
 | Big-BWT | `fa9a1663af10661d92a47d0e1f07218577bfd8bd` | PFP parsing and optional streamed suffix sorting |
 | libsais 2.12.1 | `c284ba843dd16c159acb976f17bc19382793ea75` | 64-bit phrase-token suffix/LCP construction |
+| JSON for Modern C++ 3.12.0 | `55f93686c01528224f448c19128836e7df245f72` | Native entry-point configuration and provenance JSON |
 
 Vendor manifests bind retained files to their actual SHA256 values. The Big-BWT
 snapshot omits upstream FASTA example data; its source and license files are

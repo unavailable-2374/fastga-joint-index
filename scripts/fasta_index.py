@@ -25,6 +25,14 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def mask_arguments(name, masks, args, stage):
+    """FAtoGDB writes an implicit ANO only when lowercase intervals exist."""
+    explicit = ['#' + mask['path'] for mask in masks[name]]
+    if name in args.implicit_mask and (stage / (name + '.1ano')).is_file():
+        explicit.append('#')
+    return explicit
+
+
 def run_pfp(args, samples, masks, binary, stage, work, logdir, env,
             per_input, report, children, logs, save):
     tools=args.pfp_tools.resolve()
@@ -63,8 +71,7 @@ def run_pfp(args, samples, masks, binary, stage, work, logdir, env,
     for sample in samples:
         name=sample['sample'];prefix=work/('marks-'+name);prefixes.append(prefix)
         cmd=[binary/'GIXmake-marks','-v',f'-T{per_input}','-k40','-P'+str(work),stage/(name+'.1gdb')]
-        cmd+=['#'+m['path'] for m in masks[name]]
-        if name in args.implicit_mask:cmd+=['#']
+        cmd+=mask_arguments(name,masks,args,stage)
         wait([start('marks-'+name,cmd,{'SXGC_PFP_PREFIX':str(prefix)})])
     text=work/'collection.text'
     with text.open('xb') as output:
@@ -225,8 +232,7 @@ def run_native(samples,masks,args,binary,stage,work,logdir,env,per_input,report,
         for sample in samples:
             name=sample['sample'];stream=work/(name+'.stream')
             cmd=[binary/'GIXmake-direct','-v','-T1','-k40','-P'+str(work),stage/(name+'.1gdb')]
-            cmd+=['#'+m['path'] for m in masks[name]]
-            if name in args.implicit_mask:cmd+=['#']
+            cmd+=mask_arguments(name,masks,args,stage)
             serial(name,cmd,stream,report.get('joint_filters',{}).get(name))
             report['spooled_seed_stream_bytes']+=stream.stat().st_size
             merge += [name,str(stream)]
@@ -239,8 +245,7 @@ def run_native(samples,masks,args,binary,stage,work,logdir,env,per_input,report,
     for name, cmd, fifo in [('merge', merge, None)] + [
         (s['sample'], [str(binary / 'GIXmake-direct'), '-v', f'-T{per_input}', '-k40',
                       '-P' + str(work), str(stage / (s['sample'] + '.1gdb'))] +
-                     ['#' + m['path'] for m in masks[s['sample']]] +
-                     (['#'] if s['sample'] in args.implicit_mask else []), s['fifo'])
+                     mask_arguments(s['sample'],masks,args,stage), s['fifo'])
         for s in samples]:
         log = (logdir / (name + '.log')).open('wb');logs.append(log)
         command = cmd if fifo is None else ['/bin/sh', '-c', 'exec ' + shlex.join(cmd) + ' > ' + shlex.quote(fifo)]
@@ -287,7 +292,7 @@ def run_joint(args,samples,masks,binary,stage,work,logdir,env,per_input,report,c
     prefixes=[]
     for s in samples:
         name=s['sample'];prefix=work/('marks-'+name);prefixes.append(prefix)
-        cmd=[binary/'GIXmake-marks','-v',f'-T{args.threads}','-k40','-P'+str(work),stage/(name+'.1gdb')]+['#'+m['path'] for m in masks[name]]+(['#'] if name in args.implicit_mask else [])
+        cmd=[binary/'GIXmake-marks','-v',f'-T{args.threads}','-k40','-P'+str(work),stage/(name+'.1gdb')]+mask_arguments(name,masks,args,stage)
         previous=env.get('SXGC_PFP_PREFIX');env['SXGC_PFP_PREFIX']=str(prefix)
         try:wait([start('joint-marks-'+name,cmd)])
         finally:

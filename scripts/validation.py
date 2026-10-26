@@ -7,7 +7,7 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 def toolchain_hashes(directory):
-    """Bind the launcher, actual reader and nested runtime resources together."""
+    """Bind the native entry point, actual reader and PFP resources together."""
     return {str(path.relative_to(directory)):digest(path) for path in sorted(directory.rglob('*'))
             if path.is_file() and '__pycache__' not in path.parts and path.suffix!='.pyc'}
 
@@ -26,6 +26,8 @@ class Runner:
                 source = binpath / name
                 if source.is_file():
                     shutil.copy2(source,self.binpath/name)
+            # Preserve resources when explicitly resuming an older checkpoint;
+            # current native builds have no fastga-runtime directory.
             for name in ('fastga-runtime','pfp-tools'):
                 if (binpath/name).is_dir():
                     shutil.copytree(binpath/name,self.binpath/name,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))

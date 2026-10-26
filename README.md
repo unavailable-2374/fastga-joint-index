@@ -36,9 +36,15 @@ and [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Build
 
-Requirements: Linux or macOS, CMake 3.20+, Python 3.11+, a C11/C++17 compiler,
-pthread, zlib development headers, and `patch`. Linux builds use OpenMP for
-libsais by default; macOS builds use its serial backend by default.
+Build requirements: Linux or macOS, CMake 3.20+, Python 3.11+ for source
+verification/provenance and tests, a C11/C++17 compiler, pthread, zlib development
+headers, and `patch`. Linux also needs OpenSSL 1.1+ development files for SHA-256;
+macOS uses system CommonCrypto. Linux builds use OpenMP for libsais by default;
+macOS builds use its serial backend by default. JSON for Modern C++ is vendored.
+
+**Runtime is native C/C++: `FastGA-shared` performs FASTA dispatch, construction,
+hashing, cache management and alignment without invoking Python.** Python remains
+available for the optional explicit construction and benchmark scripts.
 
 ```sh
 python3 scripts/build.py --jobs 4
@@ -71,8 +77,8 @@ FastGA-shared -T24 -pafx A.fa > A.paf
 Two FASTA inputs automatically build a joint v4 index; one FASTA builds a
 source v3 compressed index and performs self-alignment. `.fa`, `.fna`, `.fasta`
 and their gzip forms are supported. Index construction diagnostics go to stderr;
-stdout contains only alignment output. The validated C/C++ alignment driver
-remains behind the entry point as `FastGA-shared-core`.
+stdout contains only alignment output. The C++ entry point directly orchestrates
+the native tools; the validated alignment driver remains `FastGA-shared-core`.
 
 Temporary indexes are removed on completion. Add `-k` to retain and reuse them
 under `.fastga-shared/` in the current working directory. Reuse checks the complete
@@ -84,7 +90,7 @@ streams through scratch files. The first call includes construction time.
 Existing `.gix` arguments continue directly to the original alignment driver.
 `-M`, `-f`, `-S`, PAF/PSL output and `-1:` remain available. `-1:` also retains
 the generated GDB/index so the alignment file stays readable after exit. Keep
-the complete build directory, including `fastga-runtime/`, when moving the tools.
+the native tools and `pfp-tools/` together when moving the build directory.
 See [command-line details](docs/cli.md).
 
 ## Build an index explicitly
@@ -193,13 +199,14 @@ python3 scripts/build.py --output build-sanitized --sanitize-adapter --jobs 4
 ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|sanitized-runtime' --output-on-failure
 ```
 
-This optional sanitizer configuration instruments the FastGA driver/adapter,
-packer and codec test. Linked upstream support objects are not instrumented;
+This optional sanitizer configuration instruments the C++ entry point/builder,
+FastGA driver/adapter, packer and codec test. Linked upstream support objects are not instrumented;
 leak detection is disabled. It does not certify the entire upstream program.
+Current local evidence is in [native runtime verification](benchmarks/native-runtime-verification.json).
 
 | Directory | Contents |
 |---|---|
-| `src/` | Unchanged index constructor, codecs and stream backend |
+| `src/` | Original constructor/codecs/stream backend plus the C++ FASTA entry point |
 | `scripts/` | Construction, complete-input benchmarks and provenance utilities |
 | `tests/` | Explicitly labelled simulated correctness fixtures |
 | `vendor/`, `patches/` | Pinned upstream sources and reviewable modifications |

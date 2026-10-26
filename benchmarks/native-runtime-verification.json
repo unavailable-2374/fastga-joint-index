@@ -1,0 +1,664 @@
+{
+  "status": "PASS",
+  "kind": "SIMULATED_TEST_DATA_ONLY",
+  "verified_at_utc": "2026-10-26T16:47:58.749093+00:00",
+  "scope": "Actual local correctness checks for native C++ dispatch/construction. No biological performance measurement.",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "python_version_for_test_driver": "3.14.6",
+  "runtime": {
+    "implementation": "C++17",
+    "no_python_test_scope": "Actual copied native-only tool bundle: no python3 on PATH, no source checkout/runtime scripts; complete pair/self/gzip PAF comparison.",
+    "python_required": false
+  },
+  "source_sha256": {
+    "CMakeLists.txt": "b851b3a55ec3e059119a4c11554a87246c59af8d98c22a0ac928646c0275d208",
+    "src/native_runtime.hpp": "062d7fc1b9583fad57f26f176eb7f6c4688eb07ddbf173d2ed7b3e21f5082f71",
+    "src/fasta_builder.hpp": "584010d9a29cc8168d4a2e802693753551aab0e17f2b201912e4a110cb687676",
+    "src/fastga_frontend.cpp": "504a975f8bf5a9e94eb00fb9dd650ed44859e865fbfa3ce1d6442bd409b69076",
+    "scripts/fasta_index.py": "42d2f932d9fc8e7c80f82586bbc259dce9f66760726cfc6f445d53acb3ee0b66",
+    "scripts/validation.py": "572da03bdf3f9cb04900cd39f7411e4679a3de52e5894d723217deae057edf00",
+    "scripts/prepare_vendor.py": "a3371b59545ae14a7b07d5a1e9c94901bbd0936e7bf5ffc74826d4c584c808c7",
+    "scripts/write_manifest.py": "56eb43a12b320dda6ddecefde5e468412d22e8e52b6515d0374c6487a96adb38",
+    "tests/test_fasta_cli.py": "86a1d794853b8fe1c340eb8c539326b098fe2da5eafe0104784111f8a4ee8f1d",
+    "tests/test_joint.py": "a668d9b8e3b4ce9cc586761ee18660b64a5346bd24381ea885dbee7add14ad2c",
+    "vendor/nlohmann-json/UPSTREAM.json": "4e544ad52383601b62b7199402f25f6d9350bf2a021862e74bb9af52739ed4cc"
+  },
+  "executable_sha256": {
+    "FastGA-shared": "8f8a2c25968eb08bee0e2722db2334bec65d65a55536b6af500551b054baf967",
+    "FastGA-shared-core": "95dd28487a597275a68f8bfcae90bc4a9843e75d0660ac87c19f4358a5162d44",
+    "GIXmake-direct": "605d1ad125f2a0f0aaf4dd7cf5147ecd1142b9ecd95a54651fcf2ab5044a2b4b",
+    "GIXmake-marks": "f597fd26d9fc6a62127d02d5b60af82f850fec8f7937a780d02c3c0ac2a8575d",
+    "gixshare": "7e481acb17453e4aa856daffda02a70541b35e1bae4903cec58c75d2a4290cbb",
+    "joint-copy": "b501fde4a912eeeef708d0bc0e989e37f57cb7aa9818e6a54416e17bf6dfba2e"
+  },
+  "unchanged_original_core_files": 16,
+  "normal": {
+    "ctest_suites": 4,
+    "index_checks": 245,
+    "added_native_constructor_controls": [
+      {
+        "case": "identical",
+        "backend": "native-cpp",
+        "sample": "A",
+        "exact_rows_verified": 31803,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "identical",
+        "backend": "native-cpp",
+        "sample": "B",
+        "exact_rows_verified": 31803,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "identical",
+        "backend": "native-cpp",
+        "check": "complete-seeds-and-PAF",
+        "status": "PASS",
+        "paf_records": 1,
+        "exact_seed_pairs": 15900
+      },
+      {
+        "case": "inverted",
+        "backend": "native-cpp",
+        "sample": "A",
+        "exact_rows_verified": 31803,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "inverted",
+        "backend": "native-cpp",
+        "sample": "B",
+        "exact_rows_verified": 31803,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "inverted",
+        "backend": "native-cpp",
+        "check": "complete-seeds-and-PAF",
+        "status": "PASS",
+        "paf_records": 1,
+        "exact_seed_pairs": 15900
+      },
+      {
+        "case": "complex",
+        "backend": "native-cpp",
+        "sample": "A",
+        "exact_rows_verified": 41253,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "complex",
+        "backend": "native-cpp",
+        "sample": "B",
+        "exact_rows_verified": 38132,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "complex",
+        "backend": "native-cpp",
+        "check": "complete-seeds-and-PAF",
+        "status": "PASS",
+        "paf_records": 5,
+        "exact_seed_pairs": 19061
+      },
+      {
+        "case": "tandem",
+        "backend": "native-cpp",
+        "sample": "A",
+        "exact_rows_verified": 8367,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "tandem",
+        "backend": "native-cpp",
+        "sample": "B",
+        "exact_rows_verified": 9627,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "tandem",
+        "backend": "native-cpp",
+        "check": "complete-seeds-and-PAF",
+        "status": "PASS",
+        "paf_records": 0,
+        "exact_seed_pairs": 0
+      },
+      {
+        "case": "unrelated",
+        "backend": "native-cpp",
+        "sample": "A",
+        "exact_rows_verified": 11153,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "unrelated",
+        "backend": "native-cpp",
+        "sample": "B",
+        "exact_rows_verified": 10197,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "unrelated",
+        "backend": "native-cpp",
+        "check": "complete-seeds-and-PAF",
+        "status": "PASS",
+        "paf_records": 0,
+        "exact_seed_pairs": 14
+      },
+      {
+        "case": "short",
+        "backend": "native-cpp",
+        "sample": "A",
+        "exact_rows_verified": 2351,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "short",
+        "backend": "native-cpp",
+        "sample": "B",
+        "exact_rows_verified": 2351,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "short",
+        "backend": "native-cpp",
+        "check": "complete-seeds-and-PAF",
+        "status": "PASS",
+        "paf_records": 1,
+        "exact_seed_pairs": 1174
+      },
+      {
+        "case": "wide_positions",
+        "backend": "native-cpp",
+        "sample": "A",
+        "exact_rows_verified": 63613,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "wide_positions",
+        "backend": "native-cpp",
+        "sample": "B",
+        "exact_rows_verified": 31803,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "wide_positions",
+        "backend": "native-cpp",
+        "check": "complete-seeds-and-PAF",
+        "status": "PASS",
+        "paf_records": 1,
+        "exact_seed_pairs": 15964
+      },
+      {
+        "case": "wide_contigs",
+        "backend": "native-cpp",
+        "sample": "A",
+        "exact_rows_verified": 29037,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "wide_contigs",
+        "backend": "native-cpp",
+        "sample": "B",
+        "exact_rows_verified": 630,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "wide_contigs",
+        "backend": "native-cpp",
+        "check": "complete-seeds-and-PAF",
+        "status": "PASS",
+        "paf_records": 0,
+        "exact_seed_pairs": 1
+      },
+      {
+        "case": "tiny_contigs",
+        "backend": "native-cpp",
+        "sample": "A",
+        "exact_rows_verified": 32629,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "tiny_contigs",
+        "backend": "native-cpp",
+        "sample": "B",
+        "exact_rows_verified": 32629,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "tiny_contigs",
+        "backend": "native-cpp",
+        "check": "complete-seeds-and-PAF",
+        "status": "PASS",
+        "paf_records": 0,
+        "exact_seed_pairs": 16280
+      },
+      {
+        "case": "homopolymer",
+        "backend": "native-cpp",
+        "sample": "A",
+        "exact_rows_verified": 7922,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "homopolymer",
+        "backend": "native-cpp",
+        "sample": "B",
+        "exact_rows_verified": 7922,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "homopolymer",
+        "backend": "native-cpp",
+        "check": "complete-seeds-and-PAF",
+        "status": "PASS",
+        "paf_records": 0,
+        "exact_seed_pairs": 0
+      },
+      {
+        "case": "many_copies",
+        "backend": "native-cpp",
+        "sample": "A",
+        "exact_rows_verified": 2349,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "many_copies",
+        "backend": "native-cpp",
+        "sample": "B",
+        "exact_rows_verified": 2349000,
+        "status": "PASS",
+        "comparison": "complete key/mask/strand/contig/position multisets; meaningful LCPs; bounded-memory external sorting"
+      },
+      {
+        "case": "many_copies",
+        "backend": "native-cpp",
+        "check": "complete-seeds-and-PAF",
+        "status": "PASS",
+        "paf_records": 0,
+        "exact_seed_pairs": 0
+      }
+    ],
+    "merge_fasta_cases": 128,
+    "entry_point": {
+      "status": "PASS",
+      "kind": "SIMULATED_TEST_DATA_ONLY",
+      "checks": [
+        {
+          "check": "requested-T24-pair",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "requested-T24-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "temporary-cleanup",
+          "status": "PASS"
+        },
+        {
+          "check": "low-thread-pair-1",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "low-thread-pair-2",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "low-thread-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "mixed-FASTA-GIX",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "mixed-GIX-FASTA",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "existing-GIX-passthrough",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "PSL-output",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "mask-and-frequency-options",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "explicit-lowercase-masks",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "grouped-mask-symmetric-flags",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "gzip-same-stem-spaces",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "retained-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "full-self-index-and-seed-pair-equality",
+          "status": "PASS",
+          "exact_seed_pairs": 17036
+        },
+        {
+          "check": "retained-first-build",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "native-SHA256-independent-oracle",
+          "status": "PASS"
+        },
+        {
+          "check": "retained-cache-reuse",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "complete-seed-pair-equality",
+          "status": "PASS",
+          "exact_seed_pairs": 18232
+        },
+        {
+          "check": "full-index-equivalence-A",
+          "status": "PASS"
+        },
+        {
+          "check": "full-index-equivalence-B",
+          "status": "PASS"
+        },
+        {
+          "check": "one-thread-construction-budget",
+          "status": "PASS"
+        },
+        {
+          "check": "content-change-invalidates-cache",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-constructor-identity-mismatch",
+          "status": "PASS"
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-incomplete-cache",
+          "status": "PASS"
+        },
+        {
+          "check": "concurrent-retained-construction",
+          "status": "PASS"
+        },
+        {
+          "check": "one-code-retains-readable-GDB",
+          "status": "PASS"
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-invalid-options-missing-malformed-FASTA",
+          "status": "PASS"
+        },
+        {
+          "check": "frozen-benchmark-toolchain-GIX",
+          "status": "PASS"
+        },
+        {
+          "check": "frozen-benchmark-toolchain-FASTA",
+          "status": "PASS"
+        },
+        {
+          "check": "no-Python-on-PATH-pair",
+          "status": "PASS"
+        },
+        {
+          "check": "no-Python-on-PATH-self",
+          "status": "PASS"
+        },
+        {
+          "check": "no-Python-on-PATH-gzip",
+          "status": "PASS"
+        },
+        {
+          "check": "native-SIGTERM-child-and-scratch-cleanup",
+          "status": "PASS"
+        }
+      ]
+    }
+  },
+  "sanitized": {
+    "entry_point": {
+      "status": "PASS",
+      "kind": "SIMULATED_TEST_DATA_ONLY",
+      "checks": [
+        {
+          "check": "requested-T24-pair",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "requested-T24-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "temporary-cleanup",
+          "status": "PASS"
+        },
+        {
+          "check": "low-thread-pair-1",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "low-thread-pair-2",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "low-thread-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "mixed-FASTA-GIX",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "mixed-GIX-FASTA",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "existing-GIX-passthrough",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "PSL-output",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "mask-and-frequency-options",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "explicit-lowercase-masks",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "grouped-mask-symmetric-flags",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "gzip-same-stem-spaces",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "retained-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "full-self-index-and-seed-pair-equality",
+          "status": "PASS",
+          "exact_seed_pairs": 17036
+        },
+        {
+          "check": "retained-first-build",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "native-SHA256-independent-oracle",
+          "status": "PASS"
+        },
+        {
+          "check": "retained-cache-reuse",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "complete-seed-pair-equality",
+          "status": "PASS",
+          "exact_seed_pairs": 18232
+        },
+        {
+          "check": "full-index-equivalence-A",
+          "status": "PASS"
+        },
+        {
+          "check": "full-index-equivalence-B",
+          "status": "PASS"
+        },
+        {
+          "check": "one-thread-construction-budget",
+          "status": "PASS"
+        },
+        {
+          "check": "content-change-invalidates-cache",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-constructor-identity-mismatch",
+          "status": "PASS"
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-incomplete-cache",
+          "status": "PASS"
+        },
+        {
+          "check": "concurrent-retained-construction",
+          "status": "PASS"
+        },
+        {
+          "check": "one-code-retains-readable-GDB",
+          "status": "PASS"
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-invalid-options-missing-malformed-FASTA",
+          "status": "PASS"
+        },
+        {
+          "check": "frozen-benchmark-toolchain-GIX",
+          "status": "PASS"
+        },
+        {
+          "check": "frozen-benchmark-toolchain-FASTA",
+          "status": "PASS"
+        },
+        {
+          "check": "no-Python-on-PATH-pair",
+          "status": "PASS"
+        },
+        {
+          "check": "no-Python-on-PATH-self",
+          "status": "PASS"
+        },
+        {
+          "check": "no-Python-on-PATH-gzip",
+          "status": "PASS"
+        },
+        {
+          "check": "native-SIGTERM-child-and-scratch-cleanup",
+          "status": "PASS"
+        }
+      ]
+    },
+    "runtime_checks": 12,
+    "codec_status": "PASS",
+    "frontend_sha256": "e0c99f1b4b10670c63516b747c49008421f559dae117fc261743015ee96946a1",
+    "core_sha256": "1b258466509ffae1b2789e656ee89eba39233eadae0764958edc17c70f0db756",
+    "scope": "ASAN/UBSAN on the C++ entry point/builder, FastGA.c, shared_gix.cpp and codec test; linked upstream support objects uninstrumented; leak detector disabled."
+  },
+  "parameters": {
+    "entry_point_threads": [
+      1,
+      2,
+      4,
+      24
+    ],
+    "joint_fixture_threads": 4,
+    "all_inputs": "Explicitly labelled SIMULATED TEST DATA"
+  },
+  "commands": [
+    "python3 scripts/build.py --jobs 4",
+    "ctest --test-dir build --output-on-failure",
+    "python3 scripts/build.py --output build-sanitized --jobs 4 --sanitize-adapter",
+    "ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|sanitized-runtime' --output-on-failure"
+  ],
+  "resolved_regressions": [
+    "An absent FAtoGDB implicit ANO means zero lowercase intervals; explicit annotations remain required.",
+    "Interruption-test progress parsing preserves preceding sanitizer diagnostics."
+  ],
+  "historical_experiments": "Unchanged. No human alignments were resumed; prior performance numbers describe their original implementation."
+}

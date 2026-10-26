@@ -29,8 +29,11 @@
 
 ## 构建与使用
 
-依赖 Linux/macOS、CMake ≥3.20、Python ≥3.11、C11/C++17 编译器、zlib、pthread、patch。
-上游源代码已随仓库固定版本保存，构建不需要下载依赖。
+构建依赖 Linux/macOS、CMake ≥3.20、C11/C++17 编译器、zlib、pthread、patch；
+Python ≥3.11 用于源码校验、构建记录和测试。Linux 另需 OpenSSL ≥1.1 开发文件，
+macOS 使用系统 CommonCrypto 计算 SHA-256。JSON 库及原有上游源码已固定版本保存，
+构建不下载源码。**运行 `FastGA-shared` 时，入口、建索引调度、哈希、缓存与比对
+均由 C/C++ 完成，不调用 Python。** 显式构建及基准分析脚本仍可独立使用 Python。
 
 ```sh
 python3 scripts/build.py --jobs 4
@@ -49,8 +52,8 @@ v3 独立压缩索引并自比对，也支持 `.fna`、`.fasta` 及其 gzip 文�
 `-T1` 到 `-T32` 均可使用；低线程时顺序写入完整种子流以遵守预算。
 首次运行的总耗时包含建索引。`-1:` 输出会自动保留所需 GDB/索引。
 
-原有 `.gix` 参数直接交给原比对内核。移动工具时请保留整个 `build/`，包括
-`fastga-runtime/`；完整说明见[命令行文档](docs/cli.md)。
+原有 `.gix` 参数直接交给原比对内核。移动工具时请一并保留原生程序及 `pfp-tools/`；
+完整说明见[命令行文档](docs/cli.md)。
 
 也可以继续显式构建、保存索引后比对：
 
