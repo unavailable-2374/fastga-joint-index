@@ -19,6 +19,12 @@ complete FASTA lengths, native parameters, all persistent index components and
 actual command outcomes. Native/v3/joint outputs are fully compared; equality is
 not inferred from record counts or from sampled alignments.
 
+The frozen toolchain includes the FASTA launcher, `FastGA-shared-core`, nested
+runtime scripts and PFP tools. Recursive hashes bind these files together across
+initial execution, checkpoint adoption and timing replacement. The one-command
+FASTA entry point includes construction time; the `.gix` benchmark commands
+measure alignment with the entry-point startup included.
+
 The default comparison parameters are explicitly k=40, native syncmer (12,8),
 frequency 10, chain coverage 85, gap 1000, minimum alignment 100 and identity 0.7.
 Use identical explicit parameters across backends: upstream's omitted identity

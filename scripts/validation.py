@@ -1,10 +1,15 @@
 """Shared execution/provenance utilities; no generated performance observations."""
-import hashlib,json,os,shutil,sys,threading,time
+import hashlib,json,os,shutil,subprocess,sys,threading,time
 from pathlib import Path
 
 def digest(path):
     with open(path, 'rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+def toolchain_hashes(directory):
+    """Bind the launcher, actual reader and nested runtime resources together."""
+    return {str(path.relative_to(directory)):digest(path) for path in sorted(directory.rglob('*'))
+            if path.is_file() and '__pycache__' not in path.parts and path.suffix!='.pyc'}
 
 class Runner:
     def __init__(self, root, binpath, *, resume=False):
@@ -17,10 +22,13 @@ class Runner:
             self.rows = json.loads((root / 'commands.json').read_text())
         else:
             self.binpath.mkdir()
-            for name in ('FastGA-baseline','FastGA-shared','GIXmake','GIXmake-direct','GIXmake-marks','pfp-emit','joint-copy','FAtoGDB','ALNtoPAF','gixshare','build.json'):
+            for name in ('FastGA-baseline','FastGA-shared','FastGA-shared-core','GIXmake','GIXmake-direct','GIXmake-marks','pfp-emit','joint-copy','FAtoGDB','ALNtoPAF','ALNtoPSL','gixshare','build.json'):
                 source = binpath / name
                 if source.is_file():
                     shutil.copy2(source,self.binpath/name)
+            for name in ('fastga-runtime','pfp-tools'):
+                if (binpath/name).is_dir():
+                    shutil.copytree(binpath/name,self.binpath/name,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
         self.env = dict(os.environ, PATH=str(self.binpath) + os.pathsep + os.environ['PATH'])
 
     def run(self, name, args, env=None, expected_error=None, measure_tree=False, temporary_dir=None):

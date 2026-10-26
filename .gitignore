@@ -3,13 +3,17 @@
 /indexes/
 /results/
 /dist/
+.fastga-shared/
+.fastga-shared-*/
 __pycache__/
 *.pyc
 *.dSYM/
 .DS_Store
 *.fa
+*.fna
 *.fasta
 *.fa.gz
+*.fna.gz
 *.fasta.gz
 *.paf
 *.seeds

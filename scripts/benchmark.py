@@ -15,7 +15,7 @@ import statistics
 import sys
 from sequence_io import fasta_stats,paf_stats,save
 from sequence_io import merge_fastas
-from validation import Runner,digest,gix_files
+from validation import Runner,digest,gix_files,toolchain_hashes
 
 HERE=Path(__file__).resolve().parent
 
@@ -58,7 +58,7 @@ def main():
     try:
         runner=Runner(root,a.bin.resolve());binary=runner.binpath;scratch=root/'scratch';scratch.mkdir()
         runner.env['SXGC_VERIFY_TMPDIR']=str(scratch)
-        report['executables']={f.name:digest(f) for f in binary.iterdir() if f.is_file()}
+        report['executables']=toolchain_hashes(binary)
         runner.run('gixshare-help',[binary/'gixshare','--help']);runner.run('joint-copy-help',[binary/'joint-copy','--help'])
         runner.run('builder-help',[sys.executable,HERE/'fasta_index.py','--help'])
         sort=shutil.which('sort');runner.run('sort-help',[sort,'--help'])
@@ -161,7 +161,9 @@ def run_workload(a):
     try:
         for name,sha in base['executables'].items():
             if digest(build/'toolchain'/name)!=sha:raise RuntimeError('build executable changed: '+name)
-        runner=Runner(root,build/'toolchain');binary=runner.binpath;scratch=root/'scratch';scratch.mkdir();runner.env['SXGC_VERIFY_TMPDIR']=str(scratch);sort=shutil.which('sort');runner.run('sort-help',[sort,'--help'])
+        runner=Runner(root,build/'toolchain');binary=runner.binpath
+        if toolchain_hashes(binary)!=base['executables']:raise RuntimeError('frozen workload toolchain differs from build')
+        scratch=root/'scratch';scratch.mkdir();runner.env['SXGC_VERIFY_TMPDIR']=str(scratch);sort=shutil.which('sort');runner.run('sort-help',[sort,'--help'])
         paths=base['paths'];names=base['names'];query,target=(names[0],names[1]) if a.workload=='AB' else (names[1],names[0]) if a.workload=='BA' else ('merged',None)
         directories={'native':{**{n:Path(paths['native_paired'])/(n+'.gix') for n in names},'merged':Path(paths['native_merged'])/'merged.gix'},'source':{k:Path(v) for k,v in paths['sources'].items()},'joint':{**{n:Path(paths['joint'])/(n+'.gix') for n in names},'merged':Path(paths['merged_view'])/'merged.gix'}}
         ql=base['sources'][query]['contig_lengths'] if target else base['merged']['contig_lengths'];tl=base['sources'][target]['contig_lengths'] if target else ql;reference=None

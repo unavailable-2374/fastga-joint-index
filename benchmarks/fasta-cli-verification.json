@@ -1,0 +1,335 @@
+{
+  "status": "PASS",
+  "kind": "SIMULATED_TEST_DATA_ONLY",
+  "verified_at_utc": "2026-10-26T16:05:18.770604+00:00",
+  "scope": "Actual local correctness checks for the FASTA entry point; no biological performance measurements.",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "python_version": "3.14.6",
+  "source_sha256": {
+    "CMakeLists.txt": "50993b8bb5d768a41eb81c72731d9d4ec3da17f84dca5db02d4a30ab3857989c",
+    "scripts/fastga_shared.py": "a954a4b5ed3f0a9585dc1ca298dee23ad2ad2cd65561ea317cd8c29bddccf8de",
+    "scripts/fasta_index.py": "a1347ecb698f3be86542dad989363d3951ae1358e0ac06576fbf85f7c3f3782d",
+    "scripts/validation.py": "e1fa0d1823cbe936fafc4f8e2cc3d3880789ea0e965f21e26c504bc33e82c1e7",
+    "scripts/write_manifest.py": "24af35a6774f77776c173158100ee2af80f89fa77e3e6c4df48addc12a6712f3",
+    "scripts/benchmark.py": "142a62975fa25ba3d8ec378857b65cba36e938c45396c217f5a4c2d62a951666",
+    "scripts/adopt_build.py": "1df714e2c4ee18427486a5c54bc29edf0354d6ce462b73dfdf0f0c25e0abbacc",
+    "scripts/repeat_round.py": "b4dee448d186df6bd9cac2b535ccfa2ce360e205a887b0a0479671d6a868170b",
+    "tests/test_fasta_cli.py": "1f379a2d9846cd5530d560b9113663402d3a05f02958bdf5eb8c876e84161404",
+    "tests/test_joint.py": "b6c0beade6b0126b20ca470bbe848ec2a889363b4e8e3bed67fefd091043135f"
+  },
+  "core_source_identity": {
+    "status": "PASS",
+    "unchanged_files": 16
+  },
+  "normal": {
+    "ctest_suites": 4,
+    "fixture_checks": 212,
+    "merge_fasta_cases": 128,
+    "entry_point": {
+      "status": "PASS",
+      "kind": "SIMULATED_TEST_DATA_ONLY",
+      "checks": [
+        {
+          "check": "requested-T24-pair",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "requested-T24-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "temporary-cleanup",
+          "status": "PASS"
+        },
+        {
+          "check": "low-thread-pair-1",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "low-thread-pair-2",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "low-thread-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "mixed-FASTA-GIX",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "mixed-GIX-FASTA",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "existing-GIX-passthrough",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "PSL-output",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "mask-and-frequency-options",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "explicit-lowercase-masks",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "grouped-mask-symmetric-flags",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "gzip-same-stem-spaces",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "retained-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "full-self-index-and-seed-pair-equality",
+          "status": "PASS",
+          "exact_seed_pairs": 17036
+        },
+        {
+          "check": "retained-first-build",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "retained-cache-reuse",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "complete-seed-pair-equality",
+          "status": "PASS",
+          "exact_seed_pairs": 18232
+        },
+        {
+          "check": "full-index-equivalence-A",
+          "status": "PASS"
+        },
+        {
+          "check": "full-index-equivalence-B",
+          "status": "PASS"
+        },
+        {
+          "check": "one-thread-construction-budget",
+          "status": "PASS"
+        },
+        {
+          "check": "content-change-invalidates-cache",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-constructor-identity-mismatch",
+          "status": "PASS"
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-incomplete-cache",
+          "status": "PASS"
+        },
+        {
+          "check": "concurrent-retained-construction",
+          "status": "PASS"
+        },
+        {
+          "check": "one-code-retains-readable-GDB",
+          "status": "PASS"
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-invalid-options-missing-malformed-FASTA",
+          "status": "PASS"
+        },
+        {
+          "check": "frozen-benchmark-toolchain-GIX",
+          "status": "PASS"
+        },
+        {
+          "check": "frozen-benchmark-toolchain-FASTA",
+          "status": "PASS"
+        }
+      ]
+    },
+    "execution_note": "All four suites passed; the focused entry-point suite was rerun after final constructor/input-identity hardening."
+  },
+  "sanitized": {
+    "entry_point": {
+      "status": "PASS",
+      "kind": "SIMULATED_TEST_DATA_ONLY",
+      "checks": [
+        {
+          "check": "requested-T24-pair",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "requested-T24-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "temporary-cleanup",
+          "status": "PASS"
+        },
+        {
+          "check": "low-thread-pair-1",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "low-thread-pair-2",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "low-thread-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "mixed-FASTA-GIX",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "mixed-GIX-FASTA",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "existing-GIX-passthrough",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "PSL-output",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "mask-and-frequency-options",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "explicit-lowercase-masks",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "grouped-mask-symmetric-flags",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "gzip-same-stem-spaces",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "retained-self",
+          "status": "PASS",
+          "records": 2
+        },
+        {
+          "check": "full-self-index-and-seed-pair-equality",
+          "status": "PASS",
+          "exact_seed_pairs": 17036
+        },
+        {
+          "check": "retained-first-build",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "retained-cache-reuse",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "complete-seed-pair-equality",
+          "status": "PASS",
+          "exact_seed_pairs": 18232
+        },
+        {
+          "check": "full-index-equivalence-A",
+          "status": "PASS"
+        },
+        {
+          "check": "full-index-equivalence-B",
+          "status": "PASS"
+        },
+        {
+          "check": "one-thread-construction-budget",
+          "status": "PASS"
+        },
+        {
+          "check": "content-change-invalidates-cache",
+          "status": "PASS",
+          "records": 4
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-constructor-identity-mismatch",
+          "status": "PASS"
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-incomplete-cache",
+          "status": "PASS"
+        },
+        {
+          "check": "concurrent-retained-construction",
+          "status": "PASS"
+        },
+        {
+          "check": "one-code-retains-readable-GDB",
+          "status": "PASS"
+        },
+        {
+          "check": "EXPECTED_TEST_REJECTION-invalid-options-missing-malformed-FASTA",
+          "status": "PASS"
+        },
+        {
+          "check": "frozen-benchmark-toolchain-GIX",
+          "status": "PASS"
+        },
+        {
+          "check": "frozen-benchmark-toolchain-FASTA",
+          "status": "PASS"
+        }
+      ]
+    },
+    "runtime_checks": 12,
+    "codec_status": "PASS",
+    "scope": "ASAN/UBSAN on FastGA.c, shared_gix.cpp and codec test; upstream linked support objects uninstrumented; leak detector disabled.",
+    "core_sha256": "1b258466509ffae1b2789e656ee89eba39233eadae0764958edc17c70f0db756"
+  },
+  "commands": [
+    "python3 scripts/build.py --jobs 4",
+    "ctest --test-dir build --output-on-failure",
+    "python3 scripts/build.py --output build-sanitized --jobs 4 --sanitize-adapter",
+    "ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|sanitized-runtime' --output-on-failure",
+    "ctest --test-dir build -R '^fasta-entry-point$' --output-on-failure",
+    "ctest --test-dir build-sanitized -R '^fasta-entry-point$' --output-on-failure"
+  ],
+  "historical_benchmarks": "Unchanged. No human alignment experiment was resumed."
+}

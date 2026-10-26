@@ -19,3 +19,11 @@ Source origins, retained-file hashes and revisions are in each vendor
 as separate patches and apply only to build-local copies. Big-BWT executables
 remain separate processes. Upstream author names identify provenance and do not
 imply endorsement.
+
+PFP and [SXGC](https://github.com/pangenome/sxgc) are the primary methodological
+and development origins of this standalone project. The shared-index integration
+was developed in the SXGC workspace; its extracted C/C++ files are bound by
+`CORE_SOURCES.json`. Scholarly/software references for PFP, SXGC, Big-BWT,
+FastGA and libsais are provided in [REFERENCES.bib](REFERENCES.bib) and the
+README's attribution section. Citation credit is separate from the retained
+license and copyright notices above.

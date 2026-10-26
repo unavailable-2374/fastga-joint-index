@@ -8,8 +8,13 @@
   stopped by request and are explicitly incomplete.
 * `standalone-verification.json`, when present, records actual checks after
   repository extraction; it is distinct from the historical measurements.
+* [`fasta-cli-verification.json`](fasta-cli-verification.json): actual local
+  normal/sanitized execution of the one-command FASTA interface, with source
+  hashes and explicitly labelled **SIMULATED TEST DATA**. These checks make no
+  biological performance claim.
 
-All numbers are real observations. Machine paths and private cluster details
+Biological benchmark numbers are real historical observations; correctness
+fixtures are explicitly distinguished from biological input. Machine paths and private cluster details
 are omitted. Source-report digests are retained for the owner to audit against
 the original records. This directory contains no genome sequence data, index
 archives, simulated performance values or credentials.

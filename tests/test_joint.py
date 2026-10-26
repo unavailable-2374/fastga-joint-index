@@ -26,7 +26,7 @@ def main():
     def save():a.report.write_text(json.dumps(report,indent=2)+'\n')
     with tempfile.TemporaryDirectory(prefix='sxgc-joint-SIMULATED-TEST-') as directory:
         root=Path(directory);tools=root/'toolchain';tools.mkdir()
-        for name in ('GIXmake','GIXmake-direct','GIXmake-marks','pfp-emit','joint-copy','gixshare','FastGA-baseline','FastGA-shared','FAtoGDB','ALNtoPAF','build.json'):shutil.copyfile(a.bin/name,tools/name);shutil.copymode(a.bin/name,tools/name)
+        for name in ('GIXmake','GIXmake-direct','GIXmake-marks','pfp-emit','joint-copy','gixshare','FastGA-baseline','FastGA-shared','FastGA-shared-core','FAtoGDB','ALNtoPAF','build.json'):shutil.copyfile(a.bin/name,tools/name);shutil.copymode(a.bin/name,tools/name)
         a.bin=tools
         for name,sha in report['executables'].items():
             if digest(a.bin/name)!=sha:raise RuntimeError('frozen TEST executable differs: '+name)

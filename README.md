@@ -11,6 +11,29 @@ The core C/C++ implementation is unchanged from the validated integration.
 This standalone repository adds an independent build, tests, documentation and
 portable benchmark drivers. It does not require the original SXGC repository.
 
+## Origins and attribution
+
+**The main foundations of this project are Prefix-Free Parsing (PFP) and
+[SXGC](https://github.com/pangenome/sxgc).** PFP provides the phrase parsing used
+to discover shared exact-copy anchors. The shared-index code was developed as a
+FastGA integration in the SXGC workspace and extracted into this repository;
+[CORE_SOURCES.json](CORE_SOURCES.json) records the imported C/C++ snapshot.
+
+| Source | Contribution used here |
+|---|---|
+| [PFP, Boucher et al. (2019)](https://doi.org/10.1186/s13015-019-0148-5), implemented in [Big-BWT](https://gitlab.com/manzai/Big-BWT) | Phrase parsing for copy anchors; optional PFP suffix-ordering backend |
+| [SXGC](https://github.com/pangenome/sxgc) | Originating research/code workspace for this shared-index integration and its construction/validation workflow |
+| [FastGA, Myers and Zhou](https://github.com/thegenemyers/FASTGA) | Original genome sampler, seed processing, chaining, local alignment, GDB and output formats |
+| [libsais](https://github.com/IlyaGrebnov/libsais) | Phrase-token suffix-array/LCP construction |
+
+This repository packages the FastGA-compatible shared seed representation,
+exact-copy/residual codec, reader adapter and one-command interface. The SXGC
+suffixient-array proofs describe SXGC's own structures; this adapter's
+correctness evidence is its explicit full-record, seed-pair and alignment tests.
+Please credit PFP and SXGC as the primary foundations, together with FastGA and
+the upstream implementations used in an experiment. See [References](#references)
+and [third-party notices](THIRD_PARTY_NOTICES.md).
+
 ## Build
 
 Requirements: Linux or macOS, CMake 3.20+, Python 3.11+, a C11/C++17 compiler,
@@ -36,7 +59,35 @@ upstream sources and input genomes are not overwritten. Builds record compiler
 commands, source hashes and executable hashes in `build/build.json` and
 `build/pfp-tools/build.json`. Assertions remain enabled in Release builds.
 
-## Build an index from your genomes
+## Index and align in one command
+
+After building and adding `build/` to `PATH`, use the same command shape as FastGA:
+
+```sh
+FastGA-shared -T24 -pafx A.fa B.fa > A_B.paf
+FastGA-shared -T24 -pafx A.fa > A.paf
+```
+
+Two FASTA inputs automatically build a joint v4 index; one FASTA builds a
+source v3 compressed index and performs self-alignment. `.fa`, `.fna`, `.fasta`
+and their gzip forms are supported. Index construction diagnostics go to stderr;
+stdout contains only alignment output. The validated C/C++ alignment driver
+remains behind the entry point as `FastGA-shared-core`.
+
+Temporary indexes are removed on completion. Add `-k` to retain and reuse them
+under `.fastga-shared/` in the current working directory. Reuse checks the complete
+input contents, masks, construction parameters and constructor hashes; concurrent
+calls share a construction lock. `-P<directory>` selects scratch space, and
+`-T1` through `-T32` are supported. A low thread budget serializes exact seed
+streams through scratch files. The first call includes construction time.
+
+Existing `.gix` arguments continue directly to the original alignment driver.
+`-M`, `-f`, `-S`, PAF/PSL output and `-1:` remain available. `-1:` also retains
+the generated GDB/index so the alignment file stays readable after exit. Keep
+the complete build directory, including `fastga-runtime/`, when moving the tools.
+See [command-line details](docs/cli.md).
+
+## Build an index explicitly
 
 The following commands require your existing `genome-A.fa` and `genome-B.fa`
 files; FASTA.gz is also accepted. The output directory must not already exist.
@@ -53,8 +104,10 @@ FastGA-shared -T24 -pafx indexes/joint/B.gix indexes/joint/A.gix > B-to-A.paf
 ```
 
 Create the parent output directory first (`mkdir -p indexes`). `--threads` is a
-total construction budget, including the merge consumer, and must be 3–32 for
-two inputs. Construction writes no native `.gix`/`.ktab.*` intermediate indexes.
+total construction budget, including the merge consumer, and must be 1–32.
+Native sorting uses sequential raw seed spools when the budget cannot run all
+producers and the consumer concurrently; PFP sorting requires at least 2 threads.
+Construction writes no native `.gix`/`.ktab.*` intermediate indexes.
 Keep the resulting bundle and each view's matching GDB/BPS sequence files.
 
 `--backend native` is the default sorting backend. `--backend pfp` also replaces
@@ -131,11 +184,13 @@ All generated fixtures are explicitly **SIMULATED TEST DATA**. They are used for
 correctness, not performance claims. CTest covers copied/inverted/unrelated
 sequences, masking, multiplicity, coordinate widths, seek/clones, mixed native
 and joint streams, malformed inputs, independent LCP/codec oracles, external
-sorting, and complete seed/PAF equality.
+sorting, and complete seed/PAF equality. The FASTA entry-point test runs the
+documented pair/self commands, mixed FASTA/GIX inputs, low thread budgets,
+gzip/space-containing paths, retained-index reuse/concurrency, and failure cleanup.
 
 ```sh
 python3 scripts/build.py --output build-sanitized --sanitize-adapter --jobs 4
-ctest --test-dir build-sanitized -R 'codec|sanitized-runtime' --output-on-failure
+ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|sanitized-runtime' --output-on-failure
 ```
 
 This optional sanitizer configuration instruments the FastGA driver/adapter,
@@ -155,3 +210,23 @@ Read the [method](docs/method.md), [v4 format](docs/format.md), and
 [upstream changes](docs/upstream.md). Third-party license texts are retained;
 see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). A license for the new
 integration source has not been selected by the repository owner.
+
+## References
+
+1. Boucher, C., Gagie, T., Kuhnle, A., Langmead, B., Manzini, G., and Mun, T.
+   (2019). *Prefix-free parsing for building big BWTs*. Algorithms for Molecular
+   Biology **14**, 13. [doi:10.1186/s13015-019-0148-5](https://doi.org/10.1186/s13015-019-0148-5).
+   Implementation: [Big-BWT](https://gitlab.com/manzai/Big-BWT), pinned here at
+   `fa9a1663af10661d92a47d0e1f07218577bfd8bd`.
+2. *SXGC*. Software/research repository: [pangenome/sxgc](https://github.com/pangenome/sxgc).
+   Cite the exact revision used for SXGC work; the extracted integration snapshot
+   in this repository is identified by [CORE_SOURCES.json](CORE_SOURCES.json).
+3. Myers, G., and Zhou, C. *FastGA: A Fast Genome Aligner*.
+   [Source repository](https://github.com/thegenemyers/FASTGA), pinned here at
+   `178afcbba2f79abc1686e3bd2b8a916969467e83` with the documented integration patches.
+4. *libsais*. [Source repository](https://github.com/IlyaGrebnov/libsais), version
+   2.12.1, pinned here at `c284ba843dd16c159acb976f17bc19382793ea75`.
+
+Machine-readable citation entries are in [REFERENCES.bib](REFERENCES.bib).
+Record this repository's commit and the pinned dependencies when citing an
+experiment; its integration has no separately claimed publication or DOI.

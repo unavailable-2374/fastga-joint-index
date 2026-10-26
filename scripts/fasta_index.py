@@ -114,9 +114,11 @@ def build(args):
         masks[name].append(dict(path=str(path), sha256=digest(path)))
     if any(name not in masks for name in args.implicit_mask):
         raise RuntimeError('--implicit-mask requires an existing sample identifier')
-    if not len(samples) < args.threads <= 32:
-        raise RuntimeError('total threads must be greater than the number of inputs and at most 32')
-    per_input = (args.threads - 1) // len(samples)
+    if not 1 <= args.threads <= 32:
+        raise RuntimeError('total threads must be between 1 and 32')
+    if args.backend == 'pfp' and args.threads < 2:
+        raise RuntimeError('PFP sorting requires at least two threads for its concurrent emitter and sorter')
+    per_input = max(1, (args.threads - 1) // len(samples))
     binary = args.bin.resolve()
     if args.storage=='joint':
         if len(samples)!=2 or args.reference not in {s['sample'] for s in samples}:raise RuntimeError('joint storage needs exactly two samples and an explicit --reference SAMPLE')
@@ -204,6 +206,32 @@ def build(args):
 def run_native(samples,masks,args,binary,stage,work,logdir,env,per_input,report,children,logs,save):
     commands=report['commands']
     merge = [str(binary / 'gixshare'), 'build-stream', '-o', str(stage),'--storage',args.storage]
+    if args.threads <= len(samples):
+        # At low thread budgets, serialize producers and the consumer instead of
+        # oversubscribing CPUs. These are lossless raw seed streams, not GIX files.
+        report['stream_transport'] = 'sequential-spool'
+        report['spooled_seed_stream_bytes'] = 0
+        def serial(name, cmd, output, extra=None):
+            log = (logdir / (name+'.log')).open('wb');logs.append(log)
+            out = output.open('wb');logs.append(out)
+            process = subprocess.Popen(list(map(str,cmd)),stdout=out,stderr=log,
+                                       env=dict(env,**(extra or {})),start_new_session=True)
+            row = dict(name=name,command=list(map(str,cmd)),pid=process.pid)
+            entry=(name,process,row);children.append(entry);commands.append(row);save()
+            code=process.wait();row['exit_code']=code;children.remove(entry)
+            out.close();logs.remove(out);log.flush();save()
+            if code:
+                raise RuntimeError('Program '+name+' failed with: '+(logdir/(name+'.log')).read_text())
+        for sample in samples:
+            name=sample['sample'];stream=work/(name+'.stream')
+            cmd=[binary/'GIXmake-direct','-v','-T1','-k40','-P'+str(work),stage/(name+'.1gdb')]
+            cmd+=['#'+m['path'] for m in masks[name]]
+            if name in args.implicit_mask:cmd+=['#']
+            serial(name,cmd,stream,report.get('joint_filters',{}).get(name))
+            report['spooled_seed_stream_bytes']+=stream.stat().st_size
+            merge += [name,str(stream)]
+        serial('merge',merge,logdir/'merge.json')
+        return
     for s in samples:
         fifo = work / (s['sample'] + '.fifo');os.mkfifo(fifo, 0o600)
         s['fifo'] = str(fifo)
@@ -305,7 +333,7 @@ if __name__ == '__main__':
     p.add_argument('--input', action='append', required=True, metavar='SAMPLE=FASTA')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--bin', type=Path, default=Path(__file__).resolve().parents[1] / 'build')
-    p.add_argument('--threads', type=int, default=8, help='Total producer threads plus one merger; at most 32')
+    p.add_argument('--threads', type=int, default=8, help='Total thread budget, 1–32; low native-sort budgets spool exact streams sequentially')
     p.add_argument('--scratch', type=Path, default=None)
     p.add_argument('--log-dir', type=Path)
     p.add_argument('--backend',choices=('native','pfp'),default='native')

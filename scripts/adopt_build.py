@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 from sequence_io import save
-from validation import Runner, digest, gix_files
+from validation import Runner, digest, gix_files, toolchain_hashes
 
 
 def main():
@@ -51,7 +51,7 @@ def main():
             raise RuntimeError('producer merged descriptor size changed')
         runner = Runner(root, args.bin.resolve())
         binary = runner.binpath
-        report['executables'] = {p.name: digest(p) for p in binary.iterdir() if p.is_file()}
+        report['executables'] = toolchain_hashes(binary)
         runner.run('gixshare-help', [binary / 'gixshare', '--help'])
         scratch = root / 'scratch'
         scratch.mkdir()

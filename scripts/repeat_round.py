@@ -9,7 +9,7 @@ import shutil
 import socket
 import statistics
 from sequence_io import paf_stats, save
-from validation import Runner, digest
+from validation import Runner, digest, toolchain_hashes
 from benchmark import bind_allocation
 
 
@@ -49,7 +49,7 @@ def main():
     try:
         runner = Runner(root, build / 'toolchain')
         b = runner.binpath
-        if {x.name: digest(x) for x in b.iterdir() if x.is_file()} != base['executables']:
+        if toolchain_hashes(b) != base['executables']:
             raise RuntimeError('frozen executable hashes changed')
         scratch = root / 'scratch'
         scratch.mkdir()
