@@ -22,7 +22,7 @@ class Runner:
             self.rows = json.loads((root / 'commands.json').read_text())
         else:
             self.binpath.mkdir()
-            for name in ('FastGA-baseline','FastGA-shared','FastGA-shared-core','GIXmake','GIXmake-direct','GIXmake-marks','pfp-emit','joint-copy','FAtoGDB','ALNtoPAF','ALNtoPSL','gixshare','build.json'):
+            for name in ('FastGA-baseline','FastGA-shared','FastGA-shared-core','GIXmake-shared','GIXmake','GIXmake-direct','GIXmake-marks','pfp-emit','joint-copy','FAtoGDB','ALNtoPAF','ALNtoPSL','gixshare','build.json'):
                 source = binpath / name
                 if source.is_file():
                     shutil.copy2(source,self.binpath/name)

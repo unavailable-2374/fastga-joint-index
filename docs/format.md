@@ -8,7 +8,7 @@ biologically. A, B and a merged GDB use views of the same physical index.
 
 ## Construction
 
-`scripts/fasta_index.py --storage joint --reference A` requires exactly two named inputs.
+`GIXmake-shared --storage joint --reference A` requires exactly two named inputs.
 Native selected-position bitmaps are collected for both strands. The pinned
 Big-BWT parser (`fa9a1663af10661d92a47d0e1f07218577bfd8bd`, window 10,
 modulus 100) supplies phrase IDs and 5-byte ending positions. These endpoints

@@ -42,9 +42,10 @@ headers, and `patch`. Linux also needs OpenSSL 1.1+ development files for SHA-25
 macOS uses system CommonCrypto. Linux builds use OpenMP for libsais by default;
 macOS builds use its serial backend by default. JSON for Modern C++ is vendored.
 
-**Runtime is native C/C++: `FastGA-shared` performs FASTA dispatch, construction,
-hashing, cache management and alignment without invoking Python.** Python remains
-available for the optional explicit construction and benchmark scripts.
+**Index construction and alignment have native C++ entry points.** `GIXmake-shared`
+and `FastGA-shared` use one C++ builder for both native and PFP sorting, with no
+Python invocation. The former Python index constructor has been removed. Python
+supports build/provenance utilities, tests, benchmark analysis and FASTA preparation.
 
 ```sh
 python3 scripts/build.py --jobs 4
@@ -91,6 +92,7 @@ Existing `.gix` arguments continue directly to the original alignment driver.
 `-M`, `-f`, `-S`, PAF/PSL output and `-1:` remain available. `-1:` also retains
 the generated GDB/index so the alignment file stays readable after exit. Keep
 the native tools and `pfp-tools/` together when moving the build directory.
+`--index-backend pfp` selects PFP sorting for automatic FASTA construction.
 See [command-line details](docs/cli.md).
 
 ## Build an index explicitly
@@ -100,7 +102,7 @@ files; FASTA.gz is also accepted. The output directory must not already exist.
 
 ```sh
 mkdir -p indexes
-python3 scripts/fasta_index.py \
+GIXmake-shared \
   --storage joint --reference A --threads 24 \
   --input A=genome-A.fa --input B=genome-B.fa \
   --output indexes/joint
@@ -120,6 +122,11 @@ Keep the resulting bundle and each view's matching GDB/BPS sequence files.
 the sorting stage with the pinned Big-BWT backend. Both joint modes use PFP for
 copy detection. Existing v1/v2/v3 readers cannot read v4; use `FastGA-shared` from
 the same build. The non-joint storage modes remain available for comparisons.
+
+`GIXmake-shared --help` lists all parameters. Its default `--storage auto` chooses
+joint v4 for two inputs and source v3 otherwise; the first input is the default
+joint reference. Explicit `legacy`, `positions`, `source` and `joint` modes are
+available with either backend. Existing output and log directories are rejected.
 
 Lowercase masks can be stored with `--implicit-mask A` / `--implicit-mask B`;
 `FastGA-shared -M` uses stored masking. To change masks, construct a new index.
@@ -196,13 +203,13 @@ gzip/space-containing paths, retained-index reuse/concurrency, and failure clean
 
 ```sh
 python3 scripts/build.py --output build-sanitized --sanitize-adapter --jobs 4
-ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|sanitized-runtime' --output-on-failure
+ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|native-index-cli|sanitized-runtime' --output-on-failure
 ```
 
 This optional sanitizer configuration instruments the C++ entry point/builder,
 FastGA driver/adapter, packer and codec test. Linked upstream support objects are not instrumented;
 leak detection is disabled. It does not certify the entire upstream program.
-Current local evidence is in [native runtime verification](benchmarks/native-runtime-verification.json).
+Current local evidence is in [unified C++ indexing verification](benchmarks/unified-index-verification.json).
 
 | Directory | Contents |
 |---|---|

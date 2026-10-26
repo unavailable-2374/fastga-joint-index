@@ -32,7 +32,7 @@ def main():
             data={'A':[seq[:17000]+seq[17000:20000].lower()+seq[20000:],other],'B':[seq[:11000]+dna(83)+rc(seq[12000:22000])+seq[3000:9000]+'N'*73+seq[23000:32000].lower(),other]}
             for name,rows in data.items():
                 path=root/(name+'.fa');path.write_text(''.join(f'>TEST_SIMULATED_{i}\n{s}\n' for i,s in enumerate(rows)));run([a.bin/'GIXmake','-T24','-k40','-P'+str(scratch),path,native/name,'#'])
-            joint=root/'joint';run([sys.executable,HERE/'fasta_index.py','--bin',a.bin,'--pfp-tools',a.bin/'pfp-tools','--storage','joint','--reference','A','--threads','24','--input','A='+str(root/'A.fa'),'--input','B='+str(root/'B.fa'),'--implicit-mask','A','--implicit-mask','B','--output',joint,'--scratch',scratch])
+            joint=root/'joint';run([a.bin/'GIXmake-shared','--bin',a.bin,'--pfp-tools',a.bin/'pfp-tools','--storage','joint','--reference','A','--threads','24','--input','A='+str(root/'A.fa'),'--input','B='+str(root/'B.fa'),'--implicit-mask','A','--implicit-mask','B','--output',joint,'--scratch',scratch])
             merged=root/'merged.fa';merged.write_text(''.join(f'>{name}|TEST_SIMULATED_{i}\n{s}\n' for name,rows in data.items() for i,s in enumerate(rows)));run([a.bin/'GIXmake','-T24','-k40','-P'+str(scratch),merged,native/'merged','#'])
             view=root/'view';view.mkdir();(view/'merged.1gdb').symlink_to(native/'merged.1gdb');(view/'.merged.bps').symlink_to(native/'.merged.bps');run([a.bin/'gixshare','view','--index',joint,'--samples','A,B','--gdb',view/'merged.1gdb','--output',view/'merged.gix'])
             for threads in (1,24):

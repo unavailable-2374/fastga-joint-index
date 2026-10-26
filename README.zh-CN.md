@@ -32,8 +32,9 @@
 构建依赖 Linux/macOS、CMake ≥3.20、C11/C++17 编译器、zlib、pthread、patch；
 Python ≥3.11 用于源码校验、构建记录和测试。Linux 另需 OpenSSL ≥1.1 开发文件，
 macOS 使用系统 CommonCrypto 计算 SHA-256。JSON 库及原有上游源码已固定版本保存，
-构建不下载源码。**运行 `FastGA-shared` 时，入口、建索引调度、哈希、缓存与比对
-均由 C/C++ 完成，不调用 Python。** 显式构建及基准分析脚本仍可独立使用 Python。
+构建不下载源码。**独立索引命令 `GIXmake-shared` 与 `FastGA-shared` 共用 C++
+构建器，原生排序和 PFP 排序均不调用 Python；原 Python 索引构建器已删除。**
+Python 用于构建辅助、测试、基准分析和 FASTA 准备工具。
 
 ```sh
 python3 scripts/build.py --jobs 4
@@ -59,7 +60,7 @@ v3 独立压缩索引并自比对，也支持 `.fna`、`.fasta` 及其 gzip 文�
 
 ```sh
 mkdir -p indexes
-python3 scripts/fasta_index.py \
+GIXmake-shared \
   --storage joint --reference A --threads 24 \
   --input A=genome-A.fa --input B=genome-B.fa \
   --output indexes/joint
@@ -71,6 +72,10 @@ FastGA-shared -T24 -pafx indexes/joint/A.gix indexes/joint/B.gix > A-to-B.paf
 PFP 排序至少需要 2 个线程。默认使用原生排序；添加
 `--backend pfp` 可替换排序阶段。两种模式均使用 PFP 查找共享拷贝块。
 `build/` 内记录真实编译命令和源文件/可执行文件校验和。
+
+`GIXmake-shared --help` 列出完整参数；默认 `--storage auto` 在两个输入时选择
+联合索引，其余选择 source v3，联合参考默认为第一个输入。四种存储格式均可选择
+原生/PFP 排序。单命令建索引加比对也可用 `--index-backend pfp` 切换排序后端。
 
 合并自比对复用同一物理索引：
 

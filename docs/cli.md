@@ -2,8 +2,10 @@
 
 The entry point and automatic constructor are C++17. Runtime dispatch, hashing,
 cache locking, process supervision and construction invoke native tools directly.
-They require no Python interpreter or runtime script. Python is used only by
-build/test utilities and the separate optional construction/benchmark scripts.
+They require no Python interpreter or runtime script. The standalone
+`GIXmake-shared` index command uses the same C++ builder, including both sorting
+backends and all storage formats. Python supports build/test utilities, FASTA
+preparation and benchmark analysis; the Python index constructor has been removed.
 
 ```sh
 FastGA-shared -T24 -pafx A.fa B.fa > A_B.paf
@@ -69,10 +71,35 @@ FastGA-shared -k -T24 -pafx A.fa B.fa > A_B.paf
 The existing frequency, chaining, identity and output options are forwarded to
 the same FastGA driver. The standalone build includes `ALNtoPAF` and `ALNtoPSL`.
 `FastGA-shared --help` prints the entry-point notes and upstream parameter table.
-The automatic FASTA constructor supports 1–32 threads and uses native sorting
-with PFP copy detection for joint indexes. For PFP sorting or explicit selection
-of storage/reference/masks, use `scripts/fasta_index.py` and then pass its `.gix`
-views to `FastGA-shared`.
+The automatic FASTA constructor supports 1–32 threads and defaults to native
+sorting with PFP copy detection for joint indexes. Add `--index-backend pfp` to
+select PFP sorting. Both automatic sorting modes require no Python.
+
+## Standalone C++ indexing
+
+```sh
+GIXmake-shared -T24 --storage joint --reference A \
+  --input A=A.fa --input B=B.fa --output indexes/joint
+GIXmake-shared -T24 --backend pfp --storage joint --reference A \
+  --input A=A.fa --input B=B.fa --output indexes/pfp-joint
+```
+
+Create the parent output directory first. `--storage auto` is the default: two
+inputs choose joint v4 with the first input as reference; other collections use
+source v3. Explicit `legacy`, `positions`, `source` and `joint` modes are supported
+with either sorting backend. `--reference` selects the joint reference, `--mask`
+and `--implicit-mask` control annotations, and `--scratch`/`--log-dir` select
+temporary space and a new persistent log directory. Inputs have safe,
+case-insensitively unique sample names. Existing output/log directories are
+rejected, including concurrent publication attempts to the same output.
+
+`--pfp-tools`, `--pfp-window` and `--pfp-modulus` select the pinned tool directory
+and PFP parameters; joint v4 retains its fixed window 10/modulus 100 contract.
+PFP sorting needs at least two threads and streams the full DNA suffix array
+through a FIFO. The public bundle appears only after construction passes. The
+complete successful JSON report is on stdout; diagnostics are on stderr.
+`GIXmake-shared --help` lists the complete parameter table. Both entry points
+share `fasta_builder.hpp`; the Python index constructor has been removed.
 
 ## Validation
 
@@ -85,6 +112,7 @@ later conversion of 1-code output, and expected constructor/input failures.
 Additional checks run a copied native-only tool bundle with no Python in PATH,
 compare native SHA-256 with an independent hashlib oracle, and interrupt a real
 native helper to verify child and scratch cleanup. The edge-case index suite
-also runs the C++ constructor on every collection, independently of the original
-Python constructor.
+exercises both automatic and standalone construction against corrected native
+decoded records, complete seed-pair multisets and PAF/CIGAR outputs. The dedicated
+standalone suite tests all storage/backend combinations with no Python on PATH.
 These are correctness checks, not biological performance measurements.

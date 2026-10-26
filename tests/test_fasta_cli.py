@@ -80,6 +80,8 @@ def main():
             self_paf = baseline('self', ['-pafx'], True)
             compare('requested-T24-pair', [binary/'FastGA-shared', '-T24', '-pafx', *inputs], paf)
             compare('requested-T24-self', [binary/'FastGA-shared', '-T24', '-pafx', inputs[0]], self_paf)
+            compare('inline-PFP-pair', [binary/'FastGA-shared', '--index-backend', 'pfp', '-T4', '-pafx', *inputs], paf)
+            compare('inline-PFP-self', [binary/'FastGA-shared', '--index-backend=pfp', '-T4', '-pafx', inputs[0]], self_paf)
             if list(root.glob('.fastga-shared-*')) or list(scratch.iterdir()):
                 raise RuntimeError('temporary index or scratch files survived default completion')
             report['checks'].append(dict(check='temporary-cleanup', status='PASS'))
@@ -216,7 +218,7 @@ def main():
             frozen.mkdir()
             runner = Runner(frozen, binary)
             hashes = toolchain_hashes(runner.binpath)
-            for resource in ('FastGA-shared', 'FastGA-shared-core', 'pfp-tools/newscan', 'pfp-tools/build.json'):
+            for resource in ('FastGA-shared', 'GIXmake-shared', 'FastGA-shared-core', 'pfp-tools/newscan', 'pfp-tools/build.json'):
                 if resource not in hashes:
                     raise RuntimeError('frozen benchmark toolchain omitted resource: '+resource)
             for label, paths in [('GIX', [native/'A.gix', native/'B.gix']), ('FASTA', inputs)]:
@@ -229,7 +231,7 @@ def main():
             # script, shell wrapper or source checkout is available in this bundle.
             standalone=root/'native-only'
             standalone.mkdir()
-            for name in ('FastGA-shared','FastGA-shared-core','FAtoGDB','GIXmake-direct','GIXmake-marks',
+            for name in ('FastGA-shared','GIXmake-shared','FastGA-shared-core','FAtoGDB','GIXmake-direct','GIXmake-marks',
                          'gixshare','joint-copy','pfp-emit','ALNtoPAF','ALNtoPSL'):
                 shutil.copy2(binary/name,standalone/name)
             shutil.copytree(binary/'pfp-tools',standalone/'pfp-tools')

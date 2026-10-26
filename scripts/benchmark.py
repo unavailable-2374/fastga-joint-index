@@ -60,7 +60,7 @@ def main():
         runner.env['SXGC_VERIFY_TMPDIR']=str(scratch)
         report['executables']=toolchain_hashes(binary)
         runner.run('gixshare-help',[binary/'gixshare','--help']);runner.run('joint-copy-help',[binary/'joint-copy','--help'])
-        runner.run('builder-help',[sys.executable,HERE/'fasta_index.py','--help'])
+        runner.run('builder-help',[binary/'GIXmake-shared','--help'])
         sort=shutil.which('sort');runner.run('sort-help',[sort,'--help'])
         native=a.native_paired.resolve() if a.native_paired else root/'native-paired'
         merged_native=a.native_merged.resolve() if a.native_merged else root/'native-merged'
@@ -79,7 +79,7 @@ def main():
             check=runner.run('source-records-'+name,[binary/'gixshare','verify',input_dir/(name+'.gix'),sources[name]])
             report['checks'].append(dict(storage='source',sample=name,**json.loads(check.read_text())))
         joint=root/'joint'
-        runner.run('joint-direct',[sys.executable,HERE/'fasta_index.py','--bin',binary,'--pfp-tools',a.pfp_tools.resolve(),'--storage','joint','--reference',a.names[0],'--input',a.names[0]+'='+report['sources'][a.names[0]]['path'],'--input',a.names[1]+'='+report['sources'][a.names[1]]['path'],'--output',joint,'--threads',a.threads,'--scratch',scratch],measure_tree=True,temporary_dir=scratch)
+        runner.run('joint-direct',[binary/'GIXmake-shared','--bin',binary,'--pfp-tools',a.pfp_tools.resolve(),'--storage','joint','--reference',a.names[0],'--input',a.names[0]+'='+report['sources'][a.names[0]]['path'],'--input',a.names[1]+'='+report['sources'][a.names[1]]['path'],'--output',joint,'--threads',a.threads,'--scratch',scratch],measure_tree=True,temporary_dir=scratch)
         report['joint_build']=dict(runner.rows[-1],manifest=json.loads((joint/'build.json').read_text()))
         view=root/'merged-view';view.mkdir()
         for name in ('merged.1gdb','merged.gdb','.merged.bps'):

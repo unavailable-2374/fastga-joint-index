@@ -88,7 +88,7 @@ comparison. Indexes, GDBs and BPS files must remain immutable during reads.
 ```sh
 ctest --test-dir build --output-on-failure
 python3 scripts/build.py --output build-sanitized --sanitize-adapter --jobs 4
-ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|sanitized-runtime' --output-on-failure
+ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|native-index-cli|sanitized-runtime' --output-on-failure
 ```
 
 CTest's generated data are explicitly labelled SIMULATED, and temporary fixture

@@ -64,12 +64,17 @@ add_executable(FastGA-shared-core "${FG}/FastGA.c" "${SRC}/shared_gix.cpp" $<TAR
   $<TARGET_OBJECTS:gene> $<TARGET_OBJECTS:alignment> $<TARGET_OBJECTS:rsd>)
 target_compile_definitions(FastGA-shared-core PRIVATE SXGC_SHARED_GIX)
 add_executable(FastGA-shared "${SRC}/fastga_frontend.cpp")
-target_include_directories(FastGA-shared PRIVATE "${PROJECT_SOURCE_DIR}/vendor/nlohmann-json/include")
-target_link_libraries(FastGA-shared PRIVATE Threads::Threads)
+add_executable(GIXmake-shared "${SRC}/fasta_index.cpp")
 if(NOT APPLE)
   find_package(OpenSSL 1.1 REQUIRED COMPONENTS Crypto)
-  target_link_libraries(FastGA-shared PRIVATE OpenSSL::Crypto)
 endif()
+foreach(target FastGA-shared GIXmake-shared)
+  target_include_directories(${target} PRIVATE "${PROJECT_SOURCE_DIR}/vendor/nlohmann-json/include")
+  target_link_libraries(${target} PRIVATE Threads::Threads)
+  if(NOT APPLE)
+    target_link_libraries(${target} PRIVATE OpenSSL::Crypto)
+  endif()
+endforeach()
 # Remove the obsolete generated Python runtime from earlier builds.
 file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/fastga-runtime")
 add_executable(GIXmake "${FG}/GIXmake.c" $<TARGET_OBJECTS:msd> $<TARGET_OBJECTS:annotations>
@@ -138,9 +143,13 @@ if(BUILD_TESTING)
     --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/fasta-cli.json")
   set_tests_properties(fasta-entry-point PROPERTIES
     ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0;UBSAN_OPTIONS=halt_on_error=1")
+  add_test(NAME native-index-cli COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_index_cli.py"
+    --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/index-cli.json")
+  set_tests_properties(native-index-cli PROPERTIES
+    ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0;UBSAN_OPTIONS=halt_on_error=1")
 endif()
 if(SJ_SANITIZE_ADAPTER)
-  foreach(target FastGA-shared FastGA-shared-core gixshare joint-codec-test)
+  foreach(target FastGA-shared GIXmake-shared FastGA-shared-core gixshare joint-codec-test)
     if(TARGET ${target})
       target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
       target_link_options(${target} PRIVATE -fsanitize=address,undefined)
@@ -156,6 +165,6 @@ add_custom_target(provenance ALL
   COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/write_manifest.py"
     --build "${CMAKE_BINARY_DIR}" --compiler "${CMAKE_C_COMPILER}" --cxx "${CMAKE_CXX_COMPILER}"
     --openmp "$<BOOL:${SJ_ENABLE_OPENMP}>"
-  DEPENDS FastGA-baseline FastGA-shared FastGA-shared-core GIXmake GIXmake-direct GIXmake-marks
+  DEPENDS FastGA-baseline FastGA-shared GIXmake-shared FastGA-shared-core GIXmake GIXmake-direct GIXmake-marks
     FAtoGDB ALNtoPAF ALNtoPSL gixshare pfp-emit joint-copy newscan bwtparse pfbwt
   VERBATIM)

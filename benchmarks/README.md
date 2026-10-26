@@ -11,10 +11,14 @@
 * [`fasta-cli-verification.json`](fasta-cli-verification.json): historical checks
   of the earlier Python entry point, before the C++ migration. Source hashes
   identify that earlier implementation.
-* [`native-runtime-verification.json`](native-runtime-verification.json): current
-  native C++ entry-point/construction checks, with source/binary hashes, complete
-  record/seed/PAF controls, no-Python-on-PATH execution and normal/sanitized tests.
-  Fixtures are explicitly **SIMULATED TEST DATA**, with no biological performance claim.
+* [`native-runtime-verification.json`](native-runtime-verification.json): historical
+  checks of the first C++ automatic entry point, before replacing the standalone
+  Python index constructor.
+* [`unified-index-verification.json`](unified-index-verification.json): current
+  standalone/automatic C++ indexing checks, including all storage/backend
+  combinations, reference changes, masks, three inputs and concurrent publication.
+  Complete record/seed/PAF controls run with no Python on PATH under normal and
+  sanitized builds. Fixtures are **SIMULATED TEST DATA**, with no biological performance claim.
 
 Biological benchmark numbers are real historical observations; correctness
 fixtures are explicitly distinguished from biological input. Machine paths and private cluster details

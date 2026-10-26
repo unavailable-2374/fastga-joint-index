@@ -16,13 +16,22 @@ struct Options {
     int threads=8;
     fs::path scratch;
     bool keep=false;
+    std::string backend="native";
 };
 Options parse(const Command &arguments) {
     Options result;
     const char *tmp=getenv("TMPDIR"); result.scratch=tmp?tmp:".";
     std::set<char> paf_flags;
     const std::regex flags("-[vkMS]+"),integer("-[Tfcsl]\\+?[0-9]+"),paf("-paf[mxsS]*");
-    for (const auto &token:arguments) {
+    for (size_t at=0; at<arguments.size(); ++at) {
+        const auto &token=arguments[at];
+        if (token=="--index-backend" || token.rfind("--index-backend=",0)==0) {
+            if (token=="--index-backend") {
+                if (++at==arguments.size()) throw std::runtime_error("--index-backend requires native or pfp");
+                result.backend=arguments[at];
+            } else result.backend=token.substr(std::strlen("--index-backend="));
+            continue;
+        }
         if (!token.empty() && token[0]=='#') {
             if (result.inputs.empty()) throw std::runtime_error("a # mask must follow its input genome");
             result.masks.emplace_back(result.inputs.size()-1,token.substr(1));
@@ -76,14 +85,10 @@ Json configuration(const fs::path &binary, const Options &options) {
         rows.push_back({{"sample",std::string(1,"AB"[i])},{"position",i},{"path",source.string()},
                         {"sha256",sha256(source)},{"implicit_mask",!has_masks || implicit},{"masks",masks}});
     }
-    bool joint=rows.size()==2;
-    std::vector<std::string> programs={"FastGA-shared","FAtoGDB","GIXmake-direct","gixshare"};
-    if (joint) programs.insert(programs.end(),{"GIXmake-marks","joint-copy","pfp-emit","pfp-tools/build.json",
-                                             "pfp-tools/newscan","pfp-tools/bwtparse","pfp-tools/pfbwt"});
-    Json hashes=Json::object();
-    for (const auto &program:programs) hashes[program]=sha256(binary/program);
-    return {{"schema",2},{"constructor","native-cpp"},{"storage",joint?"joint":"source"},
-            {"threads",options.threads},{"inputs",rows},{"constructor_sha256",hashes}};
+    BuildSettings settings;
+    settings.storage=rows.size()==2?"joint":"source";
+    settings.backend=options.backend;
+    return make_configuration(binary,binary/"FastGA-shared",rows,options.threads,settings);
 }
 
 int align(const fs::path &binary, const fs::path &bundle, const Options &options, const Json &config) {
@@ -129,6 +134,7 @@ int main_entry(int argc, char **argv) {
                    "Without -k, temporary indexes are removed after alignment.\n"
                    "-1: output retains indexes for later sequence access.\n"
                    "Use -P<directory> for scratch; -T1 through -T32 are supported.\n\n"<<std::flush;
+        std::cout<<"--index-backend native|pfp selects FASTA sorting (PFP needs >=2 threads).\n\n"<<std::flush;
         Processes processes;
         int code=processes.wait({processes.spawn("help",{core.string()},{},{},{},true)},true);
         return code<=1?0:code; // Upstream returns 1 when displaying its parameter table.
