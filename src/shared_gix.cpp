@@ -624,6 +624,7 @@ extern "C" int64_t sxgc_joint_prefix(Kmer_Stream*s,int prefix,unsigned char**rec
 extern "C" uint64_t sxgc_joint_count(const unsigned char*a,const unsigned char*b){return sg::u64(b+9)-sg::u64(a+9);}
 extern "C" uint64_t sxgc_joint_row(const unsigned char*p){return sg::u64(p+17);}
 extern "C" void sxgc_joint_fetch(Kmer_Stream*s,uint64_t row,unsigned char*out){sg::fatal([&]{auto state=dynamic_cast<sg::JointStream*>(static_cast<sg::StreamState*>(s->shared));if(!state)sg::fail("weighted locate requires a joint stream");state->fetch(row,out);});}
+extern "C" void sxgc_joint_fetch_range(Kmer_Stream*s,uint64_t row,uint64_t count,unsigned char*out){sg::fatal([&]{auto state=dynamic_cast<sg::JointStream*>(static_cast<sg::StreamState*>(s->shared));if(!state)sg::fail("weighted locate requires a joint stream");state->fetch_range(row,count,out);});}
 extern "C" int sxgc_stream_find(Kmer_Stream *s,const unsigned char *key){return sg::fatal([&]{
     int prefix=(unsigned(key[0])<<16)|(unsigned(key[1])<<8)|key[2];int64_t lo=prefix?s->index[prefix-1]:0,hi=s->index[prefix];
     while(lo<hi){int64_t mid=lo+(hi-lo)/2;sxgc_stream_seek(s,mid);if(memcmp(s->csuf,key+3,s->hbyte)<0)lo=mid+1;else hi=mid;}

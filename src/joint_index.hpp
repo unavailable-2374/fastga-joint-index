@@ -31,12 +31,26 @@ struct Physical {
         }else{m=metadata(raw,u32(a.h.data()+16));if(a.version!=3||m.kmer!=40||m.index.back()!=int64_t(a.count))fail("joint template must be a complete source-backed archive");}
     }
 };
+#include "joint_reader_cache.hpp"
 struct Payloads {
-    std::shared_ptr<Physical>shared;const Archive&a;const Metadata&m;Bytes rows;uint64_t block=UINT64_MAX;
-    explicit Payloads(std::shared_ptr<Physical>p):shared(std::move(p)),a(shared->a),m(shared->m){}
-    const unsigned char*get(uint64_t row){if(row>=a.count)fail("joint physical row out of range");auto b=row/BLOCK;if(b!=block){auto raw=sxgc_positions::unpack(a.decode(b),a.blocks[b].codec,a.blocks[b].count,m.post,m.cont);size_t pos=0;rows.resize(size_t(a.blocks[b].count)*m.csize);
-            for(unsigned i=0;i<a.blocks[b].count;++i){take(raw,pos);if(m.csize>raw.size()-pos)fail("truncated joint template payload");memcpy(rows.data()+size_t(i)*m.csize,raw.data()+pos,m.csize);pos+=m.csize;}if(pos!=raw.size())fail("trailing joint template payload");block=b;}
-        return rows.data()+(row%BLOCK)*m.csize;}
+    std::shared_ptr<Physical>shared;const Archive&a;const Metadata&m;
+    ReaderBlockCache<Bytes>&cache;std::shared_ptr<const Bytes>rows;uint64_t block=UINT64_MAX;
+    Payloads(std::shared_ptr<Physical>p,ReaderBlockCache<Bytes>&c):shared(std::move(p)),a(shared->a),m(shared->m),cache(c){}
+    const unsigned char*get(uint64_t row){
+        if(row>=a.count)fail("joint physical row out of range");auto index=row/BLOCK;
+        if(index!=block){
+            rows=cache.get(index,[&]{
+                auto raw=sxgc_positions::unpack(a.decode(index),a.blocks[index].codec,a.blocks[index].count,m.post,m.cont);
+                size_t pos=0;Bytes result(size_t(a.blocks[index].count)*m.csize);
+                for(unsigned i=0;i<a.blocks[index].count;++i){
+                    take(raw,pos);if(m.csize>raw.size()-pos)fail("truncated joint template payload");
+                    memcpy(result.data()+size_t(i)*m.csize,raw.data()+pos,m.csize);pos+=m.csize;
+                }
+                if(pos!=raw.size())fail("trailing joint template payload");return result;
+            });block=index;
+        }
+        return rows->data()+(row%BLOCK)*m.csize;
+    }
 };
 struct JointDirectory {uint64_t ar,br,ac,bc;};
 fs::path joint_checked_metadata(const fs::path&root,const Archive&order){
@@ -77,30 +91,45 @@ std::vector<JointWeight>joint_decode_weights(const Bytes&raw,unsigned count,unsi
     for(auto&e:entries)if(e.origin&&e.weight!=1)fail("invalid residual weight");
     return entries;
 }
+#include "joint_rank.hpp"
+struct JointReadCache {
+    ReaderBlockCache<Bytes>reference,residual;
+    ReaderBlockCache<JointRankBlock>order;
+};
 struct JointCursor {
-    std::shared_ptr<JointData>d;Payloads a,b;uint64_t block=UINT64_MAX,ar=0,br=0,ordinal=0;size_t entry=0;
-    using Entry=JointWeight;std::vector<Entry>entries;std::vector<uint64_t>before;std::vector<uint32_t>aref;std::vector<size_t>matches;uint64_t matched=UINT64_MAX,keyrow=UINT64_MAX;Bytes savedkey;
-    explicit JointCursor(std::shared_ptr<JointData>x):d(std::move(x)),a(d->a),b(d->b){}
-    uint64_t weight(const Entry&e)const{return e.origin?(d->view.selection&2?1:0):((d->view.selection&1?1:0)+(d->view.selection&2?e.weight:0));}
-    void load(uint64_t v){block=v;entry=0;ordinal=0;ar=d->dir.at(v).ar;br=d->dir[v].br;auto raw=d->order.decode(v);size_t at=0;entries.clear();uint64_t ac=0,bc=0;
-        unsigned count=d->order.blocks[v].count;
-        entries=joint_decode_weights(raw,count,u32(d->order.h.data()+76));at=raw.size();
-        for(auto&e:entries){if(e.origin){if(e.weight!=1)fail("invalid residual weight");++bc;}else{++ac;if(e.weight>uint64_t(INT64_MAX)-bc)fail("joint block frequency overflow");bc+=e.weight;}}
-        if(at!=raw.size()||ac!=d->dir[v+1].ar-ar||d->dir[v+1].br-br!=entries.size()-ac||bc!=d->dir[v+1].bc-d->dir[v].bc)fail("joint order block counts mismatch");
-        before.assign(entries.size()+1,0);aref.assign(entries.size()+1,0);for(size_t i=0;i<entries.size();++i){before[i+1]=before[i]+weight(entries[i]);aref[i+1]=aref[i]+!entries[i].origin;}}
+    std::shared_ptr<JointData>d;std::shared_ptr<JointReadCache>cache;Payloads a,b;
+    uint64_t block=UINT64_MAX,ar=0,br=0,ordinal=0;unsigned entry=0;
+    std::shared_ptr<const JointRankBlock>weights;std::vector<size_t>matches;
+    uint64_t matched=UINT64_MAX,keyrow=UINT64_MAX,physical_row=UINT64_MAX;unsigned physical_sample=2;
+    uint64_t physical_pos=0,physical_start=0;uint32_t physical_contig=0;bool physical_reverse=false;Bytes savedkey,scratch_payload,scratch_key;
+    explicit JointCursor(std::shared_ptr<JointData>x,std::shared_ptr<JointReadCache>c=std::make_shared<JointReadCache>())
+      :d(std::move(x)),cache(std::move(c)),a(d->a,cache->reference),b(d->b,cache->residual){}
+    uint64_t weight(const JointWeight&e)const{return e.origin?(d->view.selection&2?1:0):((d->view.selection&1?1:0)+(d->view.selection&2?e.weight:0));}
+    void load(uint64_t v){
+        auto next=cache->order.get(v,[&]{return JointRankBlock(d->order.decode(v),d->order.blocks.at(v).count,u32(d->order.h.data()+76));});
+        auto count=next->count;auto ac=next->reference_before(count),bc=next->target_before(count);
+        auto &directory=d->dir.at(v),&end=d->dir.at(v+1);
+        if(ac!=end.ar-directory.ar||end.br-directory.br!=count-ac||bc!=end.bc-directory.bc)fail("joint order block counts mismatch");
+        weights=std::move(next);block=v;entry=0;ordinal=0;ar=directory.ar;br=directory.br;
+    }
     // A-only logical rows are exactly the physical reference rows. The order
     // archive is needed to select target/union occurrences, not reference rows.
     bool reference_only()const{return d->view.selection==1;}
-    const Entry&current()const{static const Entry reference{0,0};return reference_only()?reference:entries.at(entry);}
-    void step(){if(reference_only()){++ar;return;}auto&e=entries.at(entry);if(++ordinal<weight(e))return;ordinal=0;if(e.origin)++br;else ++ar;++entry;skip();}
-    void skip(){if(reference_only())return;for(;;){while(entry<entries.size()&&!weight(entries[entry])){if(entries[entry].origin)++br;else ++ar;++entry;}if(entry<entries.size()||block+1>=d->order.blocks.size())return;load(block+1);}}
+    JointWeight current()const{return reference_only()?JointWeight{0,0}:weights->at(entry);}
+    void step(){if(reference_only()){++ar;return;}auto e=current();if(++ordinal<weight(e))return;ordinal=0;if(e.origin)++br;else ++ar;++entry;skip();}
+    void skip(){if(reference_only())return;for(;;){while(entry<weights->count&&!weight(weights->at(entry))){if(weights->at(entry).origin)++br;else ++ar;++entry;}if(entry<weights->count||block+1>=d->order.blocks.size())return;load(block+1);}}
     void seek(uint64_t row){if(reference_only()){if(row>=d->view.count)fail("joint reference row out of range");ar=row;ordinal=0;return;}size_t l=0,r=d->dir.size();while(l<r){auto m=(l+r)/2;if(d->cumulative(d->dir[m])<=row)l=m+1;else r=m;}if(!l||l>=d->dir.size())fail("joint logical row outside directory");if(block!=l-1)load(l-1);auto left=row-d->cumulative(d->dir[block]);
-        entry=std::upper_bound(before.begin(),before.end(),left)-before.begin()-1;if(entry>=entries.size())fail("joint row select failed");ar=d->dir[block].ar+aref[entry];br=d->dir[block].br+entry-aref[entry];ordinal=left-before[entry];}
-    void next_entry(){if(reference_only()){++ar;return;}if(entries.at(entry).origin)++br;else ++ar;++entry;ordinal=0;skip();}
+        entry=weights->select(left,d->view.selection);auto ref=weights->reference_before(entry);ar=d->dir[block].ar+ref;br=d->dir[block].br+entry-ref;ordinal=left-weights->before(entry,d->view.selection);}
+    void next_entry(){if(reference_only()){++ar;return;}if(current().origin)++br;else ++ar;++entry;ordinal=0;skip();}
     void event(Bytes&payload,Bytes&key,bool keyOnly=false){
-        const auto&e=current();unsigned sample=e.origin?1:0;auto&p=sample?b:a;auto raw=p.get(sample?br:ar);
-        uint64_t pos=sxgc_positions::number(raw+2,p.m.post),rank=sxgc_positions::number(raw+2+p.m.post,p.m.cont);bool reverse=rank>>(8*p.m.cont-1);rank&=~(uint64_t(1)<<(8*p.m.cont-1));if(rank>=p.m.perm.size()||pos<(reverse?40u:0u))fail("invalid joint physical coordinate");
-        uint32_t c=p.m.perm[rank];uint64_t x=reverse?pos-40:pos;
+        const auto e=current();unsigned sample=e.origin?1:0;auto&p=sample?b:a;auto row=sample?br:ar;
+        if(physical_sample!=sample||physical_row!=row){
+            auto raw=p.get(row);auto pos=sxgc_positions::number(raw+2,p.m.post),rank=sxgc_positions::number(raw+2+p.m.post,p.m.cont);
+            bool reverse=rank>>(8*p.m.cont-1);rank&=~(uint64_t(1)<<(8*p.m.cont-1));
+            if(rank>=p.m.perm.size()||pos<(reverse?40u:0u))fail("invalid joint physical coordinate");
+            physical_sample=sample;physical_row=row;physical_pos=pos;physical_reverse=reverse;physical_contig=p.m.perm[rank];physical_start=reverse?pos-40:pos;
+        }
+        uint64_t pos=physical_pos,x=physical_start;bool reverse=physical_reverse;uint32_t c=physical_contig;
         bool copy=!sample&&(!(d->view.selection&1)||ordinal);
         if(copy){size_t id;
             if(keyOnly){id=d->intervals.first(c,x);if(id==SIZE_MAX)fail("weighted reference row has no copied occurrence");}
@@ -116,6 +145,7 @@ struct JointCursor {
         if(!e.origin&&keyrow==ar)key=savedkey;else{d->source->key_at(map[c],pos,reverse,40,key);if(!e.origin){savedkey=key;keyrow=ar;}}
 
     }
+    void event_to(unsigned char*out){event(scratch_payload,scratch_key);memcpy(out,scratch_key.data()+3,7);memcpy(out+7,scratch_payload.data(),scratch_payload.size());}
 };
 Kmer_Stream*make_joint(std::shared_ptr<JointData>);
 // Keys contain exactly forty high-pair-first bases. Count equal nucleotide
@@ -127,11 +157,11 @@ unsigned joint_lcp40(const Bytes&a,const Bytes&b){
     return tail?32+(__builtin_clz(tail)-16)/2:40;
 }
 struct JointStream:StreamState {
-    std::shared_ptr<JointData>d;JointCursor cursor,groups,locator;Bytes decoded,compact;std::vector<int>prefix;uint64_t start=UINT64_MAX,end=0,group_end=UINT64_MAX;
+    std::shared_ptr<JointData>d;std::shared_ptr<JointReadCache>cache;JointCursor cursor,groups,locator;Bytes decoded,compact;std::vector<int>prefix;uint64_t start=UINT64_MAX,end=0,group_end=UINT64_MAX;
     // A bounded lookaside cache reuses accepted rows across adjacent queries.
     // Cache hits leave the independent sequential locator position unchanged.
     std::array<uint64_t,64>located_rows;Bytes located_cache,located_payload,located_key,group_previous,group_key,group_payload;uint64_t located_row=UINT64_MAX;
-    explicit JointStream(std::shared_ptr<JointData>x):d(std::move(x)),cursor(d),groups(d),locator(d){located_rows.fill(UINT64_MAX);located_cache.resize(located_rows.size()*(7+d->view.m.csize));}
+    explicit JointStream(std::shared_ptr<JointData>x):d(std::move(x)),cache(std::make_shared<JointReadCache>()),cursor(d,cache),groups(d,cache),locator(d,cache){located_rows.fill(UINT64_MAX);located_cache.resize(located_rows.size()*(7+d->view.m.csize));}
     uint64_t compact_prefix(int p){
         if(p<0||p>0xffffff)fail("compact prefix out of range");uint64_t lo=p?d->view.m.index[p-1]:0,hi=d->view.m.index[p];compact.clear();uint64_t total=0,n=0;auto&previous=group_previous;auto&key=group_key;auto&payload=group_payload;previous.clear();
         if(lo<hi){if(group_end!=lo)groups.seek(lo);uint64_t row=lo;
@@ -148,14 +178,19 @@ struct JointStream:StreamState {
     }
     void fetch(uint64_t row,unsigned char*out){
         if(row>=d->view.count)fail("joint locate row out of range");size_t slot=row%located_rows.size(),width=7+d->view.m.csize;auto cached=located_cache.data()+slot*width;
-        if(located_rows[slot]!=row){if(located_row!=UINT64_MAX&&row==located_row+1)locator.step();else locator.seek(row);located_row=row;locator.event(located_payload,located_key);memcpy(cached,located_key.data()+3,7);memcpy(cached+7,located_payload.data(),located_payload.size());located_rows[slot]=row;}
+        if(located_rows[slot]!=row){if(located_row!=UINT64_MAX&&row==located_row+1)locator.step();else locator.seek(row);located_row=row;locator.event_to(cached);located_rows[slot]=row;}
         memcpy(out,cached,width);
+    }
+    void fetch_range(uint64_t row,uint64_t count,unsigned char*out){
+        auto width=7+d->view.m.csize;
+        if(row>d->view.count||count>d->view.count-row||count>SIZE_MAX/width||(count&&!out))fail("joint locate range out of bounds");
+        for(uint64_t i=0;i<count;++i)fetch(row+i,out+i*width);
     }
     Kmer_Stream*clone()override{return make_joint(d);}
     void seek(Kmer_Stream*s,int64_t row)override{
         if(row<0)fail("negative joint row");s->cidx=row;if(uint64_t(row)>=d->view.count){s->csuf=nullptr;s->cpre=s->ixlen;return;}
         if(start==UINT64_MAX||uint64_t(row)<start||uint64_t(row)>=end){start=row;end=std::min<uint64_t>(start+BLOCK,d->view.count);decoded.resize((end-start)*s->pbyte);prefix.resize(end-start);Bytes previous,payload,key;
-            if(start){JointCursor prior(d);prior.seek(start-1);prior.event(payload,previous);}cursor.seek(start);
+            if(start){JointCursor prior(d,cache);prior.seek(start-1);prior.event(payload,previous);}cursor.seek(start);
             for(uint64_t i=start;i<end;++i){cursor.event(payload,key);unsigned lcp=previous.empty()?0:joint_lcp40(previous,key);
                 payload[1]=lcp;auto out=decoded.data()+(i-start)*s->pbyte;memcpy(out,key.data()+3,7);memcpy(out+7,payload.data(),payload.size());prefix[i-start]=(unsigned(key[0])<<16)|(unsigned(key[1])<<8)|key[2];previous=key;if(i+1<end)cursor.step();}
         }

@@ -1,5 +1,5 @@
 diff --git a/FastGA.c b/FastGA.c
-index 6743a30..7d9225c 100644
+index 6743a30..59a43e0 100644
 --- a/FastGA.c
 +++ b/FastGA.c
 @@ -23,6 +23,9 @@
@@ -114,28 +114,23 @@ index 6743a30..7d9225c 100644
          {
  #ifdef DEBUG_MERGE
            printf("      %lld: Freq %ld\n",T1->cidx,(hgh-low)/kbyte);
-@@ -830,6 +880,20 @@ static void *new_merge_thread(void *args)
+@@ -830,6 +880,15 @@ static void *new_merge_thread(void *args)
  #endif
            continue;
          }
 +      pair_low = low; pair_high = hgh; pair_stride = kbyte;
 +#ifdef SXGC_SHARED_GIX
 +      if (compact)
-+        { uint8 *group, *out = located;
-+          for (group = low; group < hgh; group += kbyte)
-+            { uint64_t row = sxgc_joint_row(group);
-+              uint64_t count = sxgc_joint_count(group,group+kbyte);
-+              uint64_t j;
-+              for (j = 0; j < count; j++)
-+                { sxgc_joint_fetch(T2,row+j,out); out += T2->pbyte; }
-+            }
-+          pair_low = located; pair_high = out; pair_stride = T2->pbyte;
++        { uint64_t row = sxgc_joint_row(low);
++          uint64_t count = sxgc_joint_count(low,hgh);
++          sxgc_joint_fetch_range(T2,row,count,located);
++          pair_low = located; pair_high = located+count*T2->pbyte; pair_stride = T2->pbyte;
 +        }
 +#endif
        if (flip)
          { int       adest, bsign;
            IOBuffer *ou;
-@@ -837,7 +901,7 @@ static void *new_merge_thread(void *args)
+@@ -837,7 +896,7 @@ static void *new_merge_thread(void *args)
  
            pay1 = suf1+PAYOFF;
            bsign = (pay1[JSIGN] & 0x80);
@@ -144,7 +139,7 @@ index 6743a30..7d9225c 100644
              {
  #ifdef DEBUG_MERGE
                if (fst_in)
-@@ -930,7 +994,7 @@ static void *new_merge_thread(void *args)
+@@ -930,7 +989,7 @@ static void *new_merge_thread(void *args)
    
            adest = Select[acont];
    
@@ -153,7 +148,7 @@ index 6743a30..7d9225c 100644
              {
  #ifdef DEBUG_MERGE
                if (fst_in)
-@@ -1019,6 +1083,7 @@ static void *new_merge_thread(void *args)
+@@ -1019,6 +1078,7 @@ static void *new_merge_thread(void *args)
        }
    }
  
@@ -161,7 +156,7 @@ index 6743a30..7d9225c 100644
    parm->nhits = nhits;
    parm->tseed = tseed;
    return (NULL);
-@@ -2493,6 +2558,89 @@ static void adaptamer_merge(Kmer_Stream *T1, Kmer_Stream *T2,
+@@ -2493,6 +2553,89 @@ static void adaptamer_merge(Kmer_Stream *T1, Kmer_Stream *T2,
  }
  
  
@@ -211,7 +206,7 @@ index 6743a30..7d9225c 100644
 +          row = sxgc_joint_row(low); qoffset = sxgc_joint_row(g)-row;
 +          if (qoffset+qn > n) Clean_Exit(1);
 +          threshold = SOFT_MASK ? length : KMER+1;
-+          for (q = 0; q < n; q++) sxgc_joint_fetch(stream,row+q,records+q*stream->pbyte);
++          sxgc_joint_fetch_range(stream,row,n,records);
 +          for (q = qoffset; q < qoffset+qn; q++)
 +            { uint8 *query = records+q*stream->pbyte, *pay = query+PAYOFF;
 +              int sign, destination;
@@ -251,7 +246,7 @@ index 6743a30..7d9225c 100644
  static void self_adaptamer_merge(Kmer_Stream *T1, Post_List *P1, int64 g1len)
  { SP         parm[NTHREADS];
  #ifndef DEBUG_MERGE
-@@ -2500,7 +2648,10 @@ static void self_adaptamer_merge(Kmer_Stream *T1, Post_List *P1, int64 g1len)
+@@ -2500,7 +2643,10 @@ static void self_adaptamer_merge(Kmer_Stream *T1, Post_List *P1, int64 g1len)
  #endif
    uint8     *cache;
    int64      nhits, tseed;
@@ -263,7 +258,7 @@ index 6743a30..7d9225c 100644
  
    if (VERBOSE)
      { fprintf(stderr,"  Starting adaptive seed merge\n");
-@@ -2544,7 +2695,7 @@ static void self_adaptamer_merge(Kmer_Stream *T1, Post_List *P1, int64 g1len)
+@@ -2544,7 +2690,7 @@ static void self_adaptamer_merge(Kmer_Stream *T1, Post_List *P1, int64 g1len)
          parm[i].P1 = Clone_Post_List(P1);
      }
  
@@ -272,7 +267,7 @@ index 6743a30..7d9225c 100644
    if (cache == NULL)
      Clean_Exit(1);
  
-@@ -2552,13 +2703,21 @@ static void self_adaptamer_merge(Kmer_Stream *T1, Post_List *P1, int64 g1len)
+@@ -2552,13 +2698,21 @@ static void self_adaptamer_merge(Kmer_Stream *T1, Post_List *P1, int64 g1len)
      { IOBuffer *nu, *cu;
  
        parm[i].tid   = i;
@@ -295,7 +290,7 @@ index 6743a30..7d9225c 100644
    if (NEW_GIX)
      {
  #ifdef DEBUG_MERGE
-@@ -3406,14 +3565,15 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
+@@ -3406,14 +3560,15 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
  
    if (nlas > 0)
      { void    *oblock;
@@ -313,7 +308,7 @@ index 6743a30..7d9225c 100644
          Clean_Exit(1);
  
        rewind(tfile);
-@@ -3427,8 +3587,13 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
+@@ -3427,8 +3582,13 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
  
          off = oblock;
          for (j = 0; j < nlas; j++)
@@ -329,7 +324,7 @@ index 6743a30..7d9225c 100644
            }
        }
  
-@@ -3511,14 +3676,8 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
+@@ -3511,14 +3671,8 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
                if (op->bepos <= wp->bbpos || op->bbpos >= wp->bepos)  //  If b-intervals disjoint
                  continue;
  
@@ -346,7 +341,7 @@ index 6743a30..7d9225c 100644
  
                dist = entwine(op,otrace,wp,wtrace,&where,0);
                if (where != -1)   // The paths meet at a trace point given by where
-@@ -3592,7 +3751,7 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
+@@ -3592,7 +3746,7 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
                // printf(" %3d x %3d: %d-%d vs %d-%d\n            %d-%d vs %d-%d\n",
                       // j,k,o->path.abpos,o->path.aepos,w->path.abpos,w->path.aepos,
                       // o->path.bbpos,o->path.bepos,w->path.bbpos,w->path.bepos);
@@ -355,7 +350,7 @@ index 6743a30..7d9225c 100644
  
                if (op->abpos <= wp->abpos && op->aepos >= wp->aepos)
                  { w->flags |= ELIMINATED;
-@@ -3611,7 +3770,7 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
+@@ -3611,7 +3765,7 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
                tpath = o->path;
                align->path = &tpath;
                tpath.trace = tcopy = Malloc(sizeof(uint16)*tpath.tlen,"Trace");
@@ -364,7 +359,7 @@ index 6743a30..7d9225c 100644
                { uint16 *t16 = (uint16 *) tcopy;
                  uint8  *t8  = (uint8  *) tcopy;
                  int     nn;
-@@ -3628,7 +3787,7 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
+@@ -3628,7 +3782,7 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
                tpath = w->path;
                align->path = &tpath;
                tpath.trace = tcopy = Malloc(sizeof(uint16)*tpath.tlen,"Trace");
@@ -373,7 +368,7 @@ index 6743a30..7d9225c 100644
                { uint16 *t16 = (uint16 *) tcopy;
                  uint8  *t8  = (uint8  *) tcopy;
                  int     nn;
-@@ -3668,7 +3827,7 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
+@@ -3668,7 +3822,7 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
                free(o->path.trace);
              }
            else
@@ -382,7 +377,7 @@ index 6743a30..7d9225c 100644
                  { fprintf(stderr,"%s: Could not write to overlap block file %s/%s.%d.las\n",
                                   Prog_Name,SORT_PATH,ALGN_UNIQ,pair->tid);
                    Clean_Exit(1);
-@@ -3680,6 +3839,7 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
+@@ -3680,6 +3834,7 @@ static void align_contigs(uint8 *beg, uint8 *end, int swide, int ctg1, int ctg2,
          }
  
        rewind (tfile);
@@ -390,7 +385,7 @@ index 6743a30..7d9225c 100644
        free(perm);
        free(oblock);
      }
-@@ -3842,17 +4002,17 @@ static void *la_sort(void *args)
+@@ -3842,17 +3997,17 @@ static void *la_sort(void *args)
    int64 size = parm->nmemo;
    
    void     *iblock, *off;
@@ -412,7 +407,7 @@ index 6743a30..7d9225c 100644
  
    rewind(fid);
  
-@@ -3864,10 +4024,15 @@ static void *la_sort(void *args)
+@@ -3864,10 +4019,15 @@ static void *la_sort(void *args)
    
    rewind(fid);
      
@@ -431,7 +426,7 @@ index 6743a30..7d9225c 100644
      }
  
    qsort(perm,novl,sizeof(Overlap *),SORT_MAP);
-@@ -3881,7 +4046,7 @@ static void *la_sort(void *args)
+@@ -3881,7 +4041,7 @@ static void *la_sort(void *args)
                           Prog_Name,SORT_PATH,ALGN_UNIQ,parm->tid);
            Clean_Exit(1);
          }
@@ -440,7 +435,7 @@ index 6743a30..7d9225c 100644
          { fprintf(stderr,"\n%s: Cannot not write sorted overlap block file %s/%s.%d.las\n",
                           Prog_Name,SORT_PATH,ALGN_UNIQ,parm->tid);
            Clean_Exit(1);
-@@ -3892,8 +4057,9 @@ static void *la_sort(void *args)
+@@ -3892,8 +4052,9 @@ static void *la_sort(void *args)
  
    rewind(fid);
  
@@ -451,7 +446,7 @@ index 6743a30..7d9225c 100644
  
    parm->tmaxl = tmaxl;
    return (NULL);
-@@ -4035,7 +4201,9 @@ static int la_merge(TP *parm)
+@@ -4035,7 +4196,9 @@ static int la_merge(TP *parm)
    hsize = 0;
    for (i = 0; i < NTHREADS; i++)
      { if (in[i].ptr < in[i].top)
@@ -462,7 +457,7 @@ index 6743a30..7d9225c 100644
            in[i].ptr  += EXO_SIZE;
            hsize      += 1;
            heap[hsize] = ovls + i;
-@@ -4106,7 +4274,9 @@ static int la_merge(TP *parm)
+@@ -4106,7 +4269,9 @@ static int la_merge(TP *parm)
            hsize  -= 1;
            continue;
          }
@@ -473,7 +468,7 @@ index 6743a30..7d9225c 100644
        src->ptr += EXO_SIZE;
      }
  
-@@ -4410,25 +4580,33 @@ static void pair_sort_search(GDB *gdb1, GDB *gdb2)
+@@ -4410,25 +4575,33 @@ static void pair_sort_search(GDB *gdb1, GDB *gdb2)
      Clean_Exit(1);
  }
  
@@ -513,7 +508,7 @@ index 6743a30..7d9225c 100644
  }
  
  int main(int argc, char *argv[])
-@@ -4736,6 +4914,15 @@ int main(int argc, char *argv[])
+@@ -4736,6 +4909,15 @@ int main(int argc, char *argv[])
            }
        }
  
@@ -529,7 +524,7 @@ index 6743a30..7d9225c 100644
      if (TYPE1 <= IS_GDB || NMASK1 > 0)
        { char *command;
          int   nchar, k;
-@@ -4926,7 +5113,7 @@ int main(int argc, char *argv[])
+@@ -4926,7 +5108,7 @@ int main(int argc, char *argv[])
  
      if (Read_GDB(gdb1,Catenate(PATH1,"/",ROOT1,GEXTN1)) < 0)
        Clean_Exit(1);
@@ -538,7 +533,7 @@ index 6743a30..7d9225c 100644
  
      if (SELF)
        gdb2 = gdb1;
-@@ -4940,10 +5127,14 @@ int main(int argc, char *argv[])
+@@ -4940,10 +5122,14 @@ int main(int argc, char *argv[])
  
          if (Read_GDB(gdb2,Catenate(PATH2,"/",ROOT2,GEXTN2)) < 0)
            Clean_Exit(1);
@@ -554,7 +549,7 @@ index 6743a30..7d9225c 100644
    if (OUT_TYPE != 2)
      { ONE_ROOT = Strdup(Numbered_Suffix("_oaln.",getpid(),""),"Allocating temp name");
        ONE_PATH = SORT_PATH;
-@@ -5152,6 +5343,30 @@ int main(int argc, char *argv[])
+@@ -5152,6 +5338,30 @@ int main(int argc, char *argv[])
      else
        adaptamer_merge(T1,T2,P1,P2,gdb1->seqtot);
  

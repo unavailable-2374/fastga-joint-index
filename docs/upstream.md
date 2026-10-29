@@ -29,7 +29,8 @@ build. The patch and exact expected patched-source hashes are reviewable.
 `patches/bigbwt.patch` retains the tested upstream serial kernels, removes an
 optional allocation interposer, and preserves the required five-byte SA stream.
 
-`CORE_SOURCES.json` records the unchanged integration C/C++ inputs used during
-standalone extraction. This repository omits the original, independent SXI probe
+`CORE_SOURCES.json` records the historical integration C/C++ inputs used during
+standalone extraction. Later reader changes are tracked in Git and the actual
+build/verification manifests. This repository omits the original, independent SXI probe
 and its unrelated monorepo dependencies. v1/v2/v3 storage compatibility needed
 by controlled comparisons remains in the shared backend.

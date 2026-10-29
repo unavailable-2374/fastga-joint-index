@@ -97,6 +97,19 @@ def main():
                             indexes[mode][query], indexes[mode][target or query], audits[mode]])
                         evidence['checks'].append(dict(case=label, query=query, storage=mode,
                             paf_records=len(outputs[mode]), **json.loads(control.read_text())))
+            # Compare identical frozen readers to validate the complete benchmark
+            # protocol itself. SIMULATED data, with no acceleration assertion.
+            comparison=work/'reader-protocol'
+            runner.run('reader-comparison-protocol',[sys.executable,ROOT/'scripts/benchmark_reader.py',
+                '--build',work/'native','--candidate-bin',runner.binpath,'--threads','4',
+                '--output',comparison,'--label','SIMULATED TEST DATA; identical readers, protocol validation only'])
+            protocol=json.loads((comparison/'report.json').read_text())
+            assert protocol['status']=='PASS' and len(protocol['alignments'])==33 and len(protocol['checks'])==9
+            assert protocol['executables']['baseline']==protocol['executables']['candidate']
+            assert len([v for v in protocol['alignments'] if v['pass_number']>=0])==24
+            assert all(v['status']=='PASS' for v in protocol['checks'])
+            evidence['checks'].append(dict(case='identical-reader-comparison-protocol',kind='SIMULATED TEST DATA',
+                complete_controls=len(protocol['checks']),timed_commands=24,status='PASS',note='No speedup claim.'))
             evidence['status']='PASS'
     except BaseException as error:
         evidence.update(status='FAILED',error=str(error))

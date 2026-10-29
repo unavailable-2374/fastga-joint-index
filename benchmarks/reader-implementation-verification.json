@@ -1,0 +1,74 @@
+{
+  "status": "PASS",
+  "kind": "SIMULATED TEST AND IMPLEMENTATION VERIFICATION; no biological speedup claim",
+  "verified_at_utc": "2026-10-29T16:31:14.004831+00:00",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "parent_revision": "d6efb9067c685ba4b989cd5d195c2ad583341c71",
+  "scope": "Native joint-reader block reuse, contiguous batch restore, packed 40-mer reconstruction and bitmap rank/select. Existing disk formats and full seed/alignment semantics preserved.",
+  "source_sha256": {
+    "CMakeLists.txt": "f71d6fafa696ccd18265658f2832d56fef779d0465b156363635fdc1cda3eef2",
+    "CORE_SOURCES.json": "604bb6075aeb5c82dd585a36f5eb94040c5648070a5b01b87202b07cee64d5e2",
+    "src/joint_reader_cache.hpp": "425180048425d70d63a9e80aac93c9104df57830901c7ef7e7cb6914cff254ee",
+    "src/joint_rank.hpp": "127638e2129da57bb3f51a31473674305c21f5dffe4037b572fb8c68483f4fad",
+    "src/joint_index.hpp": "3397994b5012914f094d705a16283a3d12e70b2099224c886a914d12cad09f46",
+    "src/gdb_key_source.hpp": "ec0a794fd363a9d8449beaf5a26bae5cf81dfb8890f540030e2391aa576c1745",
+    "src/shared_gix.cpp": "c454bea61361b918002e83af3dbb69df9b43762c8bfaea07df87fafe7b9a86bf",
+    "src/shared_gix.h": "f99a5b5d0c745815580231db74796b358754823e8d303d836142c448668a5c7e",
+    "src/joint_pack.hpp": "c5110c75124fefb3bdedc33b16c6f6fb44063d257aa47b80f3cb4798e4b9ce57",
+    "patches/fastga.patch": "4b8b66856a014daf88e97d8db4b0b1ea42c678abac04eaedccd13f6508597539",
+    "vendor/fastga/UPSTREAM.json": "faf09ba888db3f6a3f059b83f0d44ab8f2f0de8dd1173af0fb4d71b793d0268c",
+    "scripts/benchmark_reader.py": "d36b45066a258442486bbda17dd7db09b505ad43c228efa21139a0e52e8e5b89",
+    "tests/test_codec.cpp": "edc23ba58c68108fede5dce355c5c8dac58d106200d37acb6a91fb0f3d0ffd7a",
+    "tests/test_joint.py": "6d30e32675bb28f2b16b15469b7445c4ed620ef56e3c8445222c109b21bbf14e",
+    "tests/test_construction.py": "25a26bd02e0b3a6e380af540eebca299c149bf6d180153b9efe7e0e46f7ad5ea"
+  },
+  "implementation": {
+    "decoded_blocks": "Four cache entries per reference/residual/order archive per stream, immutable pins across that stream\u2019s cursors; clones own independent mutable caches.",
+    "batch_api": "sxgc_joint_fetch_range; both directional and self drivers use one call per accepted contiguous range",
+    "rank_select": "64-bit bitmap words, word-level ranks, exact large-weight exceptions; legacy weight frames supported",
+    "packed_keys": "Bounded 10/11-byte reads for k=40, scalar path retained for other supported widths",
+    "disk_format_changed": false
+  },
+  "regular": {
+    "ctest": "7/7 PASS; updated construction/reader comparison additionally rerun 1/1 PASS",
+    "complete_fixture_checks": 249,
+    "batch_rows_compared_against_sequential": 18700,
+    "automatic_cli_checks": 37,
+    "standalone_cli_checks": 83,
+    "construction_and_reader_protocol_checks": 22,
+    "reader_protocol": {
+      "case": "identical-reader-comparison-protocol",
+      "kind": "SIMULATED TEST DATA",
+      "complete_controls": 9,
+      "timed_commands": 24,
+      "status": "PASS",
+      "note": "No speedup claim."
+    }
+  },
+  "sanitizer": {
+    "ctest": "4/4 PASS",
+    "codec": {
+      "status": "PASS",
+      "kind": "SIMULATED_CODEC_TEST",
+      "independent_wire_oracles": 1,
+      "roundtrip_rows": 258056,
+      "scalar_lcp_oracle_pairs": 5248,
+      "rank_select_oracle_queries": 830796,
+      "packed40_oracle_pairs": 8192,
+      "cache_checks": 3,
+      "external_sort_rows": 10000,
+      "expected_rejections": 16
+    },
+    "complete_fixture_checks": 249,
+    "batch_rows_compared_against_sequential": 18700,
+    "runtime_checks": 12,
+    "scope": "ASAN/UBSAN on native frontends/builder, adapter/driver, packer, provenance writer and codec; linked upstream support objects not instrumented; leak detection disabled."
+  },
+  "executable_sha256": {
+    "FastGA-shared": "dfdbb80530fcd948131b13275d110c9d7108baf6617ab8eb25a6866b175a701b",
+    "FastGA-shared-core": "d8f4105ce7c5a7f4bf92f652693b22787080ff245d35ad5bd41e06ff47327c3b",
+    "gixshare": "f206471deecbba9ae0c8cf9aab0ff995ccce391cb1bcb562c017756d0ff0d75a",
+    "joint-codec-test": "24c5d0225ebce756550522365bad150fd68d9e15533325bfc4e670a72dd3f0ec"
+  },
+  "performance_note": "CPU samples and real complete-input timing experiments are separate from these correctness fixtures; this record claims no speedup."
+}

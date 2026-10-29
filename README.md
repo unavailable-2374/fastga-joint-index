@@ -7,8 +7,9 @@ from FASTA, store reference occurrences once, and represent matching query
 occurrences through exact relative copies plus residual positions. PFP supplies
 copy anchors; FastGA still performs the adaptive seeding, chaining and alignment.
 
-The core C/C++ implementation is unchanged from the validated integration.
-This standalone repository adds an independent build, tests, documentation and
+The lossless storage contract originates in the validated integration.
+This standalone repository maintains the C/C++ implementation, including reader
+optimizations, and provides an independent build, tests, documentation and
 portable benchmark drivers. It does not require the original SXGC repository.
 
 ## Origins and attribution
@@ -224,7 +225,10 @@ This optional sanitizer configuration instruments the C++ entry point/builder,
 FastGA driver/adapter, packer, provenance writer and codec test. Linked upstream support objects are not instrumented;
 leak detection is disabled. It does not certify the entire upstream program.
 The previous C++ migration snapshot is in [unified indexing verification](benchmarks/unified-index-verification.json).
-Current local checks are in [CMake build and timing verification](benchmarks/cmake-build-verification.json).
+Build-system migration checks are in [CMake build and timing verification](benchmarks/cmake-build-verification.json).
+Current reader correctness checks are in [reader implementation verification](benchmarks/reader-implementation-verification.json);
+the [reader implementation notes](docs/reader-optimization.md) describe block reuse,
+batched restoration and bitmap rank/select.
 
 | Directory | Contents |
 |---|---|

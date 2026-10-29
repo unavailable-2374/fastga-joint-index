@@ -87,6 +87,18 @@ void joint_check_seek(const fs::path&p){
     for(uint64_t i=0;i<std::min<uint64_t>(1000,total);++i)selected.push_back((i*11400714819323198485ull)%total);for(uint64_t i=BLOCK;i<total&&i<BLOCK*100;++i)if(i%BLOCK<=1||i%BLOCK==BLOCK-1)selected.push_back(i);if(total)selected.push_back(total-1);std::sort(selected.begin(),selected.end());selected.erase(std::unique(selected.begin(),selected.end()),selected.end());std::vector<Bytes>expected;size_t at=0;
     for(uint64_t row=0;row<total;++row){if(at<selected.size()&&selected[at]==row){Bytes record(4+s->pbyte);put32(record.data(),s->cpre);memcpy(record.data()+4,s->csuf,s->pbyte);expected.push_back(std::move(record));++at;}sxgc_stream_next(s.get());}
     auto clone=std::unique_ptr<Kmer_Stream,decltype(&sxgc_stream_free)>(sxgc_stream_clone(s.get()),sxgc_stream_free);
-    for(size_t i=selected.size();i-->0;){for(auto*stream:{s.get(),clone.get()}){sxgc_stream_seek(stream,selected[i]);auto&record=expected[i];if(stream->cpre!=int(u32(record.data()))||memcmp(record.data()+4,stream->csuf,stream->pbyte))fail("joint seek/clone disagrees with sequential decode");}}
-    sxgc_stream_seek(s.get(),total);if(s->csuf)fail("joint EOF seek failed");std::cout<<"{\"status\":\"PASS\",\"full_rows_scanned\":"<<total<<",\"seek_and_clone_positions\":"<<selected.size()<<"}\n";
+    uint64_t batch_rows=0;
+    for(size_t i=selected.size();i-->0;){
+        for(auto*stream:{s.get(),clone.get()}){sxgc_stream_seek(stream,selected[i]);auto&record=expected[i];if(stream->cpre!=int(u32(record.data()))||memcmp(record.data()+4,stream->csuf,stream->pbyte))fail("joint seek/clone disagrees with sequential decode");}
+        if(sxgc_stream_is_joint(s.get())&&(i%17==0||selected[i]%BLOCK<=1||selected[i]%BLOCK==BLOCK-1)){
+            auto start=selected[i],count=std::min<uint64_t>(17,total-start);Bytes want(count*s->pbyte),actual(want.size());
+            for(uint64_t j=0;j<count;++j){sxgc_stream_seek(s.get(),start+j);memcpy(want.data()+j*s->pbyte,s->csuf,s->pbyte);want[j*s->pbyte+8]=0;}
+            sxgc_joint_fetch_range(clone.get(),start,count,actual.data());
+            if(actual!=want)fail("joint batch restore differs from sequential decode");
+            for(uint64_t j=count;j-->0;){Bytes one(s->pbyte);sxgc_joint_fetch(s.get(),start+j,one.data());if(memcmp(one.data(),want.data()+j*s->pbyte,s->pbyte))fail("joint scalar restore differs from batch oracle");}
+            batch_rows+=count;
+        }
+    }
+    if(sxgc_stream_is_joint(s.get()))sxgc_joint_fetch_range(s.get(),total,0,nullptr);
+    sxgc_stream_seek(s.get(),total);if(s->csuf)fail("joint EOF seek failed");std::cout<<"{\"status\":\"PASS\",\"full_rows_scanned\":"<<total<<",\"seek_and_clone_positions\":"<<selected.size()<<",\"batch_rows_checked\":"<<batch_rows<<"}\n";
 }

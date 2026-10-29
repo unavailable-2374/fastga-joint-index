@@ -26,6 +26,8 @@ int64_t sxgc_joint_prefix(Kmer_Stream *s,int prefix,unsigned char **records);
 uint64_t sxgc_joint_count(const unsigned char *first,const unsigned char *last);
 uint64_t sxgc_joint_row(const unsigned char *record);
 void sxgc_joint_fetch(Kmer_Stream *s,uint64_t row,unsigned char *record);
+/* Restore a contiguous accepted range in one call; count native-shaped rows. */
+void sxgc_joint_fetch_range(Kmer_Stream *s,uint64_t row,uint64_t count,unsigned char *records);
 #ifdef __cplusplus
 }
 #endif

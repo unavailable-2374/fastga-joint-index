@@ -103,6 +103,18 @@ LCP 11. Counts precede masking, as in native FastGA. Accepted groups are located
 lazily; key recovery uses one representative occurrence, while rejected
 high-frequency groups avoid expanding all target positions.
 
+Each stream owns four-entry caches for decoded reference, residual and order
+blocks. Its sequential, grouping and locating cursors pin immutable cached
+objects; clones share immutable index metadata and own separate mutable caches.
+Eviction never invalidates a pinned block. Weight codec 1 is indexed directly
+with 64-bit bitmap words, word-level rank directories and exact 64-bit weight
+exceptions; legacy codec 0 is also readable. No extra on-disk directory is added.
+The driver restores accepted contiguous occurrence ranges with
+`sxgc_joint_fetch_range`, retaining the scalar ABI for existing callers. Physical
+coordinates are reused across copied occurrences. Forty-base keys use bounded
+10/11-byte packed-DNA reads and word transforms, including reversed copies.
+CRC checks, source identity checks and occurrence multiplicities are preserved.
+
 Self comparison excludes the query occurrence when choosing the longest
 prefix: repeated exact keys use length 40; singleton keys use the longest LCP
 to either neighboring key. The frequency range still includes the query itself,

@@ -117,6 +117,36 @@ program fails, stop dependent stages, retain its exact error and resolve the
 cause. Do not replace failed outputs with generated data or weaken the equality
 comparison. Indexes, GDBs and BPS files must remain immutable during reads.
 
+## Comparing reader revisions on identical indexes
+
+`scripts/benchmark_reader.py` freezes the producer reader from a complete
+construction checkpoint and a separately built candidate. Both read the exact
+same native/joint index, GDB and BPS bytes; hashes are checked before and after.
+The comparison performs three complete candidate/native index-record controls,
+complete native/baseline/candidate seed and PAF/CIGAR controls on both directions
+and merged self, then four paired timing rounds with alternating reader order.
+The first complete PAF is fully parsed; later sorted bytes must match exactly.
+It reports actual time medians, ratios and peak RSS observations, with no
+required speedup threshold. Build, verification, sorting and profiling are
+excluded from the timed commands. Keep the timing allocation free of other work.
+The native `-v` phase clocks separately report setup/seeding, seed
+sorting/chaining/local alignment, and output conversion. Setup/seeding includes
+decoding and other work; it is not an isolated decoder timer. RSS comes from
+normalized `wait4` observations rather than upstream's printed MB field.
+
+```sh
+python3 scripts/benchmark_reader.py --help
+python3 scripts/benchmark_reader.py --build results/checkpoint \
+  --candidate-bin build --threads 24 --output results/reader-comparison \
+  --label 'Complete supplied assemblies; provenance follows the input manifest'
+```
+
+The construction checkpoint must retain the original frozen producer toolchain.
+Use a new output directory. Synthetic input requires an explicit SIMULATED
+label; historical biological reports are not rewritten. A CPU sampler such as
+macOS `sample` is run separately from the clean timing rounds; a sampled run's
+wall time is not a clean speed measurement, and inlining changes symbol counts.
+
 ## Local tests
 
 ```sh

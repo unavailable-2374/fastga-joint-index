@@ -47,12 +47,26 @@ struct SourceKeys {
         if(rank>=m.perm.size()||uint64_t(m.perm[rank])>=contigs.size())fail("source key refers to an invalid/padded contig");
         key_at(m.perm[rank],pos,bool(payload[m.csize-1]&128),m.kmer,out);
     }
+    static void packed40(const unsigned char*p,unsigned shift,bool reverse,Bytes&out){
+        auto pair_order=[](uint64_t x){return ((x&0x0303030303030303ull)<<6)|((x&0x0c0c0c0c0c0c0c0cull)<<2)|
+            ((x&0x3030303030303030ull)>>2)|((x&0xc0c0c0c0c0c0c0c0ull)>>6);};
+        uint64_t head=u64(p);unsigned tail=unsigned(p[8])|(unsigned(p[9])<<8);out.resize(10);
+        if(shift){head=(head>>shift)|(uint64_t(p[8])<<(64-shift));tail=(tail>>shift)|(unsigned(p[10])<<(16-shift));}
+        if(reverse){out[0]=(tail>>8)^255;out[1]=tail^255;put64(out.data()+2,__builtin_bswap64(head)^UINT64_MAX);}
+        else{put64(out.data(),pair_order(head));auto last=pair_order(tail);out[8]=last;out[9]=last>>8;}
+    }
     void key_at(uint64_t contig,uint64_t pos,bool reverse,unsigned kmer,Bytes &out)const{
         if(contig>=contigs.size())fail("source key refers to an invalid/padded contig");
         const auto &c=contigs[contig];uint64_t length=c.clen;
         if(pos>length||(reverse?pos<uint64_t(kmer):uint64_t(kmer)>length-pos))fail("source key outside contig");
         uint64_t start=reverse?pos-kmer:pos,at=uint64_t(c.boff)+start/4;
         unsigned shift=(start%4)*2;out.resize(kmer/4);
+        if(kmer==40){
+            // Normalize all 32 leading bases with one word transform. Only the
+            // required 10/11 source bytes are read, including at contig ends.
+            packed40(bps.data+at,shift,reverse,out);
+            return;
+        }
         // GDB stores the first base in the low pair; GIX keys use the high
         // pair first. Normalize each byte before applying the base offset.
         static const std::array<unsigned char,256> pairs=[](){std::array<unsigned char,256> table{};

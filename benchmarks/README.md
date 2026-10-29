@@ -1,6 +1,11 @@
 # Benchmark summaries
 
-* [`cmake-build-verification.json`](cmake-build-verification.json): current local
+* [`reader-implementation-verification.json`](reader-implementation-verification.json):
+  current native-reader correctness checks, independent bitmap/key oracles,
+  cross-block batch restore and normal/sanitized complete fixture controls.
+  All generated inputs are explicitly **SIMULATED TEST DATA**; this record makes
+  no biological performance claim.
+* [`cmake-build-verification.json`](cmake-build-verification.json): historical local
   CMake-only build and native provenance checks, construction-time accounting
   tests, and full normal/sanitized correctness controls. Construction fixtures
   are **SIMULATED TEST DATA**; their unmet space target is retained, with no

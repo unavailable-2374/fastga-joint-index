@@ -53,7 +53,9 @@ FastGA-shared -T24 -pafx A.fa > A.paf
 合并视图计时包含新建 GDB，复用原生索引时未实测的构建时间标为空；旧实验不补造计时数据。
 仅比较构建可使用 `--construction-only`：完成全部构建正确性检查后报告 `MEASURED`，
 如实保留联合索引更大的结果，不宣称已通过空间或速度验收。
-本次本地验证记录见 [CMake 构建与计时检查](benchmarks/cmake-build-verification.json)。
+CMake 迁移验证见 [构建与计时检查](benchmarks/cmake-build-verification.json)。
+当前读入器的块缓存复用、批量恢复和位图查找见 [实现说明](docs/reader-optimization.md)，
+完整模拟数据及 sanitizer 结果见 [读入器正确性记录](benchmarks/reader-implementation-verification.json)。
 
 以上直接读取你的 FASTA：两个输入自动构建 v4 联合索引并比对；一个输入构建
 v3 独立压缩索引并自比对，也支持 `.fna`、`.fasta` 及其 gzip 文件。

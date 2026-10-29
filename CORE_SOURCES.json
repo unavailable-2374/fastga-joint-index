@@ -1,5 +1,5 @@
 {
-  "source": "Extracted from the validated FastGA integration; core C/C++ files are unchanged.",
+  "source": "Historical C/C++ snapshot extracted from the validated FastGA integration. These hashes identify the imported snapshot; subsequent reader changes are tracked in Git and build/verification manifests.",
   "files": {
     "direct_stream.c": "13daffd8bf78437b52f7386628921b6c8ccd8f28d0dc88946d604672d1f331e2",
     "direct_stream.h": "989d83b7300df6ead3853f8a7a014ccdfd4ef599c41b6a57178c1e8860152020",

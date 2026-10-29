@@ -36,9 +36,13 @@ while emission excludes it. These details are necessary for exact native seed
 equivalence; matching PAFs alone would not establish the seed contract.
 
 Reference-only reads can address physical reference rows directly. The target
-and merged views use weighted selection. Reader-local scratch buffers, a bounded
-lookaside cache and packed 40-mer LCP calculations reduce decoding work without
-changing the on-disk format or seed selection.
+and merged views use weighted selection. Each stream's cursors reuse immutable
+decoded blocks through bounded caches; clones keep independent mutable caches.
+Word-level rank/select indexes weight bitmaps without per-row prefix arrays.
+Accepted contiguous ranges are restored through one batch call, reusing physical
+coordinates across copies. Packed 40-mer reconstruction and LCP calculations use
+word operations. The row lookaside cache remains bounded. These changes preserve
+the on-disk format and seed selection.
 
 Copy candidates are phrase based, so this is not a globally optimal relative
 parse. Similarity, contig structure, boundaries and reference choice affect
