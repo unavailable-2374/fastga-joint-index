@@ -1,5 +1,11 @@
 # Benchmark summaries
 
+* [`reader-hap.json`](reader-hap.json): actual complete HAP same-index reader
+  comparison on 2026-10-29. All four paired rounds, phase/memory observations,
+  paired sensitivity, complete index/seed/PAF controls and immutable file hashes
+  are retained. This is an old-joint versus optimized-joint reader comparison,
+  separate from the historical native/v3/v4 acceptance and human measurements.
+
 * [`reader-implementation-verification.json`](reader-implementation-verification.json):
   current native-reader correctness checks, independent bitmap/key oracles,
   cross-block batch restore and normal/sanitized complete fixture controls.
@@ -31,8 +37,8 @@
   Complete record/seed/PAF controls run with no Python on PATH under normal and
   sanitized builds. Fixtures are **SIMULATED TEST DATA**, with no biological performance claim.
 
-Biological benchmark numbers are real historical observations; correctness
-fixtures are explicitly distinguished from biological input. Machine paths and private cluster details
+Biological benchmark numbers are actual complete-input observations with their
+source/version scope; correctness fixtures are explicitly distinguished from biological input. Machine paths and private cluster details
 are omitted. Source-report digests are retained for the owner to audit against
 the original records. This directory contains no genome sequence data, index
 archives, simulated performance values or credentials.

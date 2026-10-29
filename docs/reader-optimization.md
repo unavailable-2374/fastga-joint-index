@@ -41,3 +41,50 @@ candidate/native index record, verifies complete seed and PAF controls, and
 alternates reader order for four clean timing rounds. CPU sampling is separate;
 sampled-run wall time and changes in inlined symbol counts are not speedup
 estimates. Lower decoding cost does not by itself establish an end-to-end gain.
+
+## Complete HAP reader comparison (2026-10-29)
+
+Both columns use the same joint-v4 index files. The baseline reader is
+`d6efb90`; the optimized implementation is `b854279`. Inputs are the complete
+upstream HAP examples (172,998,213 bases), with matching published repository
+input hashes. This is not a human-genome speed measurement.
+
+The host was an Apple M2 Pro with 12 logical CPUs and 16 GiB RAM, running
+macOS 27.0 with `-T24`. Both readers used Release `-O3` builds with debug symbols.
+OS cache was uncontrolled; reader order alternated across four paired rounds.
+
+| Workload | Previous joint reader | Optimized joint reader | Wall-time reduction |
+|---|---:|---:|---:|
+| A → B | 20.44 s | 18.93 s | 7.4% |
+| B → A | 20.22 s | 19.32 s | 4.5% |
+| Merged self | 65.56 s | 61.29 s | 6.5% |
+
+Setup/seeding phase medians (including setup work, not isolated decoding):
+
+| Workload | Previous | Optimized | Wall-time reduction |
+|---|---:|---:|---:|
+| A → B | 6.19 s | 4.90 s | 20.8% |
+| B → A | 5.78 s | 4.78 s | 17.3% |
+| Merged self | 6.55 s | 5.49 s | 16.2% |
+
+All four rounds are retained. As a sensitivity check, the median of same-round
+candidate/baseline ratios gives wall-time reductions of 7.1%, 4.3%, 4.6% for A → B, B → A and self, respectively.
+One self round was slower for the candidate; the self observations vary more
+than the directional runs. These are descriptive single-host observations,
+without a statistical-significance or universal speedup claim.
+
+Median peak RSS, in the same workload order: 903.3 → 896.8 MiB; 875.9 → 876.1 MiB; 1399.3 → 1393.2 MiB.
+The measured peak RSS stayed close to the baseline on this host.
+
+All three complete candidate/native index-record controls and all six complete
+reader/native seed-pair controls passed. All 33 complete PAF/CIGAR outputs
+matched their fully parsed native controls after sorting. The merged view
+contains 129,707,076 logical index rows; self-alignment checked 215,048,576 seed
+pairs and 1,463,498 PAF records. Every participating index/GDB/BPS file kept the
+same SHA-256 before and after the experiment; the disk representation did not
+change.
+
+[Raw timing observations, paired sensitivity, complete checks and hashes](../benchmarks/reader-hap.json)
+are exported separately from the older native/v3/v4 benchmark. Native phase CPU
+counters describe the parent process; output-converter child CPU is excluded.
+Phase medians are calculated separately and need not sum to the total median.

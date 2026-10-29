@@ -133,6 +133,8 @@ The native `-v` phase clocks separately report setup/seeding, seed
 sorting/chaining/local alignment, and output conversion. Setup/seeding includes
 decoding and other work; it is not an isolated decoder timer. RSS comes from
 normalized `wait4` observations rather than upstream's printed MB field.
+Native phase CPU counters describe the parent process; output-converter child
+CPU is excluded, while wall time includes waiting for that child.
 
 ```sh
 python3 scripts/benchmark_reader.py --help

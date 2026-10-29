@@ -120,6 +120,13 @@ FastGA-shared -T24 -pafx merged.gix > self.paf
 1.178、1.145、1.053 倍。该测量使用 12 逻辑 CPU 的 macOS 主机、`-T24` 和
 未控制的 OS 缓存；HAP 示例结果不能当作人类基因组速度结果。
 
+2026-10-29 又对完整 HAP 做了**同一份联合 v4 索引的旧、新读入器对照**：四轮总耗时中位数
+在 A→B、B→A、合并自比对上分别缩短 **7.4%、4.5%、6.5%**，全量记录、种子与排序后
+PAF/CIGAR 一致，索引文件哈希未改变。环境为 Apple M2 Pro、12 逻辑核、16 GiB、`-T24`，
+OS 缓存未控制；同轮配对比值的中位数对应缩短 7.1%、4.3%、4.6%，自比对存在单轮变慢，
+所有轮次均保留。详见 [阶段耗时、内存及敏感性记录](docs/reader-optimization.md#complete-hap-reader-comparison-2026-10-29)
+和 [原始计时摘要](benchmarks/reader-hap.json)。这组结果比较两个联合索引读入器版本。
+
 [结果摘要](benchmarks/) 保留真实数字及来源摘要校验和，不包含个人机器路径、
 SSH 信息、基因组 FASTA、索引大文件或二进制程序。所有生成的小数据都明确标记
 为 **SIMULATED TEST DATA**，仅用于正确性测试。

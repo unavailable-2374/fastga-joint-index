@@ -177,6 +177,14 @@ match, and four-round joint/v3 time ratios are 1.178, 1.145 and 1.053. These are
 descriptive measurements on a 12-logical-CPU macOS host using `-T24`, with
 uncontrolled OS cache. They are not human-genome performance measurements.
 
+A separate same-index HAP reader comparison on 2026-10-29 measured the optimized
+joint reader against the previous joint reader: four-round total wall-time
+medians decreased by 7.4%, 4.5% and 6.5% for A → B, B → A and merged self. Full
+record/seed/PAF controls passed; index bytes stayed unchanged. Both columns used
+joint v4 on a 12-logical-CPU Apple M2 Pro with `-T24` and uncontrolled OS cache.
+[All observations and paired sensitivity](docs/reader-optimization.md#complete-hap-reader-comparison-2026-10-29)
+are reported separately from the historical native/v3 comparison.
+
 See [benchmark details](docs/benchmarks.md) and the [real result summaries](benchmarks/).
 Standalone extraction verification is recorded separately from these historical
 full-input measurements.

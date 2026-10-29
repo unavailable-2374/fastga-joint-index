@@ -1,17 +1,18 @@
 # Real observations and verification scope
 
-The JSON files in `benchmarks/` export actual observations from the original
-integration before standalone extraction. Numeric results and hashes are
-unchanged. Private machine paths, hostnames, scheduler IDs and SSH details have
-been omitted; source-report hashes are retained. Genome data and index binaries
-are not bundled. Standalone build tests are a separate verification record.
+`benchmarks/hap.json` and `benchmarks/human.json` retain actual observations from
+the original integration before standalone extraction. Their numeric results
+and hashes are unchanged. Later reader comparisons and standalone build tests
+have separate records. Private machine paths, hostnames, scheduler IDs and SSH
+details are omitted; source-report hashes are retained. Genome data and index
+binaries are not bundled.
 
 All storage figures below count persistent index companions and descriptors,
 excluding common GDB sequence storage. GB means 1,000,000,000 bytes.
 
 The current benchmark also records complete FASTA-to-index construction times
 in `construction.scopes`, separately from alignment times, with four fresh
-rounds by default. The historical biological runs below did not collect that
+rounds by default. The historical HAP/human runs did not collect that
 matched construction-time comparison; their missing medians are not inferred
 from conversion times or alignment logs. See [the timing scope](reproducibility.md).
 
@@ -67,6 +68,19 @@ uncontrolled; backend order alternated. These are descriptive observations,
 not a universal runtime guarantee. A known source-packaging overlap required
 replacing the complete final three-backend self round. Original observations
 and the exclusion reason are retained in [`hap.json`](../benchmarks/hap.json).
+
+## Same-index reader comparison (2026-10-29)
+
+The complete HAP examples were rerun with the previous and optimized joint-v4
+readers on identical index files. Four-round total time medians were
+20.44 → 18.93 s (A → B), 20.22 → 19.32 s (B → A), and 65.56 → 61.29 s (merged self).
+All complete index/seed/PAF controls passed. The hardware was an Apple M2 Pro
+with 12 logical CPUs, 16 GiB RAM and `-T24`; OS cache was uncontrolled. All four
+rounds, including the self round where the optimized reader was slower, remain
+in the report. Paired sensitivity and phase/memory observations are in the
+[reader comparison](reader-optimization.md#complete-hap-reader-comparison-2026-10-29)
+and [raw summary](../benchmarks/reader-hap.json). Both columns are joint-v4 readers;
+the historical native/v3 observations above keep their original scope.
 
 ## Correctness fixtures
 
