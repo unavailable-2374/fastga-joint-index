@@ -31,7 +31,7 @@ inline Json make_configuration(const fs::path &binary, const fs::path &driver, J
     if (settings.pfp_tools.empty()) settings.pfp_tools=binary/"pfp-tools";
     if (pfp) {
         settings.pfp_tools=fs::canonical(settings.pfp_tools);
-        for (auto name:{"build.json","newscan","bwtparse","pfbwt"}) {
+        for (auto name:{"build.json","newscan","pscan","bwtparse","pfbwt"}) {
             auto path=settings.pfp_tools/name;
             auto key=settings.pfp_tools==binary/"pfp-tools"?std::string("pfp-tools/")+name:path.string();
             hashes[key]=sha256(path);
@@ -44,15 +44,17 @@ inline Json make_configuration(const fs::path &binary, const fs::path &driver, J
 }
 
 inline void validate_identities(const Json &config) {
+    std::vector<fs::path> paths;
+    std::vector<std::string> expected;
     for (const auto &sample:config.at("inputs")) {
-        auto verify=[](const Json &row) {
-            auto path=row.at("path").get<std::string>();
-            if (sha256(path)!=row.at("sha256").get<std::string>())
-                throw std::runtime_error("input changed during construction/alignment: " + path);
-        };
-        verify(sample);
-        for (const auto &mask:sample.at("masks")) verify(mask);
+        paths.push_back(sample.at("path").get<std::string>()); expected.push_back(sample.at("sha256").get<std::string>());
+        for (const auto &mask:sample.at("masks")) {
+            paths.push_back(mask.at("path").get<std::string>()); expected.push_back(mask.at("sha256").get<std::string>());
+        }
     }
+    auto actual=sha256_all(paths,config.at("threads").get<int>());
+    for (size_t i=0; i<paths.size(); ++i)
+        if (actual[i]!=expected[i]) throw std::runtime_error("input changed during construction/alignment: " + paths[i].string());
 }
 
 inline void validate_bundle(const fs::path &bundle, const Json &config) {
@@ -78,13 +80,35 @@ class FastaBuilder {
     fs::path stage_,work_,logs_;
     Json report_;
     Processes *processes_=nullptr;
-    int threads_,per_input_;
+    int threads_;
+    int stream_ranges_=-1; // gixshare --ranges for the native stream consumer; -1 keeps its default
+    bool verifying_=false; // re-running the two-step joint path as an oracle: not part of the report
     fs::path pfp_tools() const { return config_.at("pfp_tools").get<std::string>(); }
     std::string backend() const { return config_.at("backend").get<std::string>(); }
     int window() const { return config_.at("pfp_window").get<int>(); }
     int modulus() const { return config_.at("pfp_modulus").get<int>(); }
 
     void save() { write_json(logs_/"build.json",report_); }
+    // Thread budget: the programs of a concurrent stage run side by side, and the
+    // threads each computes with sum to at most -T; a serial stage runs them one
+    // after another. Threads that only wait (joins, blocked pipe writes) do not count.
+    void allot(const std::string &stage, const std::vector<std::pair<std::string,int>> &parts, bool concurrent=true) {
+        int total=0; Json programs=Json::object();
+        for (const auto &[name,n]:parts) {
+            if (n<1) throw std::runtime_error("thread plan for "+stage+" gives "+name+" no thread");
+            programs[name]=n; total=concurrent?total+n:std::max(total,n);
+        }
+        if (total>threads_) throw std::runtime_error("thread plan for "+stage+" uses "+std::to_string(total)+" threads, over the -T budget of "+std::to_string(threads_));
+        if (!verifying_) report_["thread_allocation"][stage]={{"programs",programs},{"schedule",concurrent?"concurrent":"serial"},{"total",total}};
+    }
+    // FASTGA_SHARED_<NAME>="x,y" replaces a default split for measurements; allot() still checks it.
+    static bool split_override(const char *variable, int &x, int &y) {
+        const char *value=std::getenv(variable);
+        if (!value) return false;
+        int a=-1,b=-1; char end=0;
+        if (std::sscanf(value,"%d,%d%c",&a,&b,&end)!=2 || a<0 || b<1) throw std::runtime_error(std::string(variable)+" must be X,Y");
+        x=a; y=b; return true;
+    }
     size_t start(const std::string &name, Command command, const fs::path &output={},
                  const std::map<std::string,std::string> &environment={}) {
         auto id=processes_->spawn(name,std::move(command),output.empty()?logs_/(name+".log"):output,
@@ -112,51 +136,159 @@ class FastaBuilder {
             if (sha256(tools/item.key())!=item.value().get<std::string>()) throw std::runtime_error("joint PFP executable changed: "+item.key());
         return manifest;
     }
-    std::vector<fs::path> mark_samples(int threads) {
+    // The inputs share -T when they run side by side; FASTGA_SHARED_SERIAL_MARKS
+    // runs them one after another, each with the whole budget.
+    std::vector<fs::path> mark_samples() {
+        const auto &samples=config_.at("inputs");
+        int n=static_cast<int>(samples.size());
+        bool concurrent=n>1 && threads_>=n && !std::getenv("FASTGA_SHARED_SERIAL_MARKS");
+        int threads=concurrent?threads_/n:threads_;
+        std::vector<std::pair<std::string,int>> plan;
+        for (const auto &sample:samples) plan.emplace_back("marks-"+sample.at("sample").get<std::string>(),threads);
+        allot("marks",plan,concurrent);
+        report_["marks_concurrent"]=concurrent;
         std::vector<fs::path> prefixes;
-        for (const auto &sample:config_.at("inputs")) {
+        std::vector<size_t> ids;
+        for (const auto &sample:samples) {
             auto name=sample.at("sample").get<std::string>();
             auto prefix=work_/("marks-"+name); prefixes.push_back(prefix);
-            run("marks-"+name,producer(sample,"GIXmake-marks",threads),{},{{"SXGC_PFP_PREFIX",prefix.string()}});
+            auto id=start("marks-"+name,producer(sample,"GIXmake-marks",threads),{},{{"SXGC_PFP_PREFIX",prefix.string()}});
+            if (concurrent) ids.push_back(id); else wait({id});
         }
+        if (concurrent) wait(ids);
         return prefixes;
+    }
+    // Parallel concatenation: every chunk lands at its final offset, so the bytes equal a sequential copy.
+    void concatenate(const std::vector<fs::path> &sources, const fs::path &target) {
+        constexpr uint64_t chunk=uint64_t(64)<<20;
+        struct Piece { int fd; uint64_t from, to, length; };
+        std::vector<int> inputs;
+        auto close_all=[&]{ for (int fd:inputs) close(fd); };
+        int out=open(target.c_str(),O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0666);
+        if (out<0) fail_errno("create "+target.string());
+        std::vector<Piece> pieces;
+        uint64_t total=0;
+        try {
+            for (const auto &source:sources) {
+                int fd=open(source.c_str(),O_RDONLY|O_CLOEXEC);
+                if (fd<0) throw std::runtime_error("cannot read marked text: "+source.string()+": "+std::strerror(errno));
+                inputs.push_back(fd);
+                uint64_t size=fs::file_size(source);
+                for (uint64_t at=0; at<size; at+=chunk) pieces.push_back({fd,at,total+at,std::min(chunk,size-at)});
+                total+=size;
+            }
+            if (total && ftruncate(out,total)<0) fail_errno("size "+target.string());
+            std::atomic<size_t> next{0};
+            std::mutex guard; std::exception_ptr failure;
+            auto work=[&]{
+                std::vector<char> buffer;
+                try {
+                    for (;;) {
+                        size_t index=next.fetch_add(1);
+                        if (index>=pieces.size()) return;
+                        { std::lock_guard<std::mutex> lock(guard); if (failure) return; }
+                        check_signal();
+                        auto piece=pieces[index];
+                        uint64_t done=0;
+#ifdef __linux__
+                        bool kernel=true;
+#else
+                        bool kernel=false;
+#endif
+                        while (done<piece.length) {
+                            ssize_t n=-1;
+                            if (kernel) {
+#ifdef __linux__
+                                off_t in=piece.from+done, put=piece.to+done;
+                                n=copy_file_range(piece.fd,&in,out,&put,piece.length-done,0);
+                                if (n<0 && (errno==EXDEV||errno==EINVAL||errno==ENOSYS||errno==EOPNOTSUPP||errno==EPERM)) { kernel=false; continue; }
+#endif
+                            } else {
+                                if (buffer.empty()) buffer.resize(size_t(4)<<20);
+                                size_t want=std::min<uint64_t>(buffer.size(),piece.length-done);
+                                n=pread(piece.fd,buffer.data(),want,piece.from+done);
+                                if (n>0) {
+                                    ssize_t sent=0;
+                                    while (sent<n) {
+                                        ssize_t w=pwrite(out,buffer.data()+sent,n-sent,piece.to+done+sent);
+                                        if (w<0 && errno==EINTR) continue;
+                                        if (w<=0) fail_errno("collection text write failed");
+                                        sent+=w;
+                                    }
+                                }
+                            }
+                            if (n<0 && errno==EINTR) continue;
+                            if (n<0) fail_errno("collection text copy failed");
+                            if (n==0) throw std::runtime_error("marked text ended early while building the collection");
+                            done+=n;
+                        }
+                    }
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(guard);
+                    if (!failure) failure=std::current_exception();
+                }
+            };
+            size_t workers=std::max<size_t>(1,std::min<size_t>({size_t(threads_),size_t(8),pieces.size()}));
+            report_["collection_copy_threads"]=workers;
+            allot("collection-copy",{{"concatenate",static_cast<int>(workers)}});
+            std::vector<std::thread> pool;
+            for (size_t i=1; i<workers; ++i) pool.emplace_back(work);
+            work();
+            for (auto &t:pool) t.join();
+            if (failure) std::rethrow_exception(failure);
+        } catch (...) {
+            close_all(); close(out);
+            throw;
+        }
+        close_all();
+        if (close(out)<0) fail_errno("collection text write failed");
     }
     fs::path parse_collection(const std::vector<fs::path> &prefixes, bool remove_marked_text) {
         auto text=work_/"collection.text";
-        std::ofstream output(text,std::ios::binary);
-        std::vector<char> buffer(1<<20);
-        for (const auto &prefix:prefixes) {
-            auto source=fs::path(prefix.string()+".text");
-            std::ifstream input(source,std::ios::binary);
-            if (!input) throw std::runtime_error("cannot read marked text: "+prefix.string());
-            while (input) {
-                check_signal(); input.read(buffer.data(),buffer.size());
-                if (input.gcount()) output.write(buffer.data(),input.gcount());
-            }
-            if (!input.eof()) throw std::runtime_error("marked text read failed: "+prefix.string());
-            input.close();
-            if (remove_marked_text) fs::remove(source);
-        }
-        output.close(); if (!output) throw std::runtime_error("collection text write failed");
+        std::vector<fs::path> sources;
+        for (const auto &prefix:prefixes) sources.emplace_back(prefix.string()+".text");
+        concatenate(sources,text);
+        if (remove_marked_text) for (const auto &source:sources) fs::remove(source);
         uint64_t size=fs::file_size(text); report_["pfp_text_bytes"]=size;
         if (!size || size>=(uint64_t(1)<<40)) throw std::runtime_error("PFP collection exceeds the 5-byte coordinate limit");
-        run("pfp-parse",{(pfp_tools()/"newscan").string(),"-w"+std::to_string(window()),"-p"+std::to_string(modulus()),"-s",text.string()});
+        // pscan emits the same dictionary, occurrence, parse, last and sai files as serial newscan for any thread count.
+        run("pfp-parse",{(pfp_tools()/"pscan").string(),"-w"+std::to_string(window()),"-p"+std::to_string(modulus()),"-s",
+                         "-t"+std::to_string(threads_),text.string()});
+        report_["pfp_parse_threads"]=threads_;
+        allot("pfp-parse",{{"pfp-parse",threads_}});
         report_["pfp_parse_bytes"]=fs::file_size(text.string()+".parse");
         report_["pfp_dictionary_bytes"]=fs::file_size(text.string()+".dict");
         return text;
     }
-    void emit_pfp(const std::vector<fs::path> &prefixes, const fs::path &text, const std::string &storage) {
-        run("pfp-parse-order",{(pfp_tools()/"bwtparse").string(),"-s",text.string()});
+    void emit_pfp(const std::vector<fs::path> &prefixes, const fs::path &text, const std::string &storage,
+                  const std::vector<std::string> &extra={}) {
         fs::path sa=text.string()+".sa";
+        if (!verifying_) {
+            allot("pfp-parse-order",{{"pfp-parse-order",threads_}});
+            run("pfp-parse-order",{(pfp_tools()/"bwtparse").string(),"-s","-p"+std::to_string(threads_),text.string()});
+        } else { fs::remove(sa); fs::remove(text.string()+".bwt"); } // the parse order of the first run is reused
         if (mkfifo(sa.c_str(),0600)<0) fail_errno("create PFP suffix-array FIFO");
         fs::create_symlink("/dev/null",text.string()+".bwt");
-        Command emit={(binary_/"pfp-emit").string(),"--text",text.string(),"--sa",sa.string(),"--output",stage_.string(),"--storage",storage};
+        // pfbwt -t A computes with A workers, its producing main thread and its
+        // ordered writer; without -t it is the serial sorter. pfp-emit --threads B
+        // includes its main thread.
+        // The fused joint writer adds the order sink to the emitter, which then limits the stage:
+        // it gets half the budget (measured on chr20 at -T24: 10 sorter workers + 12 emitter threads).
+        int emitter=std::max(1,extra.empty()?threads_/3:threads_/2),sorter_workers=threads_-2-emitter;
+        if (!split_override("FASTGA_SHARED_PFP_SPLIT",sorter_workers,emitter) && sorter_workers<1) { sorter_workers=0; emitter=threads_-1; }
+        allot("pfp-sort-emit",{{"pfp-suffix-order",sorter_workers?sorter_workers+2:1},{"pfp-emit",emitter}});
+        Command sort={(pfp_tools()/"pfbwt").string(),"-S","-w"+std::to_string(window())};
+        if (sorter_workers) sort.push_back("-t"+std::to_string(sorter_workers));
+        sort.push_back(text.string());
+        Command emit={(binary_/"pfp-emit").string(),"--text",text.string(),"--sa",sa.string(),"--output",stage_.string(),"--storage",storage,
+                     "--threads",std::to_string(emitter)};
+        emit.insert(emit.end(),extra.begin(),extra.end());
         const auto &samples=config_.at("inputs");
         for (size_t i=0; i<samples.size(); ++i) {
             emit.push_back("--sample"); emit.push_back(samples[i].at("sample").get<std::string>()+"="+prefixes[i].string());
         }
         auto consumer=start("pfp-emit",emit,logs_/"merge.json");
-        auto sorter=start("pfp-suffix-order",{(pfp_tools()/"pfbwt").string(),"-S","-w"+std::to_string(window()),text.string()});
+        auto sorter=start("pfp-suffix-order",sort);
         wait({consumer,sorter});
         if (!fs::is_fifo(sa)) throw std::runtime_error("PFP suffix array was materialized unexpectedly");
         report_[storage=="joint-template"?"full_dna_sa_materialized":"full_sa_materialized"]=false;
@@ -165,22 +297,42 @@ class FastaBuilder {
         auto manifest=verify_pfp();
         report_["pfp_toolchain"]=manifest; report_["pfp_used"]=true;
         report_["pfp_manifest_sha256"]=sha256(pfp_tools()/"build.json");
-        report_["pfp_parameters"]={{"window",window()},{"modulus",modulus()},{"sorter","Big-BWT PFP, upstream serial kernels"}};
-        auto prefixes=mark_samples(per_input_);
+        report_["pfp_parameters"]={{"window",window()},{"modulus",modulus()},{"sorter","Big-BWT PFP: multithreaded pscan parse, libsais parse SA, libsais dictionary SA/LCP, multithreaded ordered-stream SA expansion"}};
+        auto prefixes=mark_samples();
         auto text=parse_collection(prefixes,true);
         emit_pfp(prefixes,text,storage);
         if (verify_pfp()!=manifest) throw std::runtime_error("PFP toolchain manifest changed during construction");
     }
-    void native_streams(const std::string &storage, const std::map<std::string,std::string> &target_filter={}) {
+    void native_streams(const std::string &storage, const std::map<std::string,std::string> &target_filter={},
+                        const std::vector<std::string> &extra={}) {
         const auto &samples=config_.at("inputs");
-        Command merge={(binary_/"gixshare").string(),"build-stream","-o",stage_.string(),"--storage",storage};
-        bool sequential=static_cast<size_t>(threads_)<=samples.size();
+        // The sorters stream into the block encoder side by side: n producers of P
+        // threads plus an encoder of E threads (main included). When the budget
+        // cannot give each one a thread, the streams spool and every step gets -T.
+        // Measured on the macaque pair (3.0e9 rows): the sorters need 590 core-seconds in
+        // all, the consumer about 3000 (range merge, weights, block packing), so the
+        // consumer gets almost everything: P = max(1,T/12) per producer.
+        int n=static_cast<int>(samples.size()),producers=std::min(std::max(1,threads_/12),(threads_-1)/n),encoder=threads_-n*producers;
+        split_override("FASTGA_SHARED_NATIVE_SPLIT",producers,encoder);
+        bool sequential=producers<1;
+        if (sequential) producers=encoder=threads_;
+        std::vector<std::pair<std::string,int>> plan;
+        for (const auto &sample:samples) plan.emplace_back(sample.at("sample").get<std::string>(),producers);
+        plan.emplace_back("merge",encoder);
+        allot("native-sort-stream",plan,!sequential);
+        Command merge={(binary_/"gixshare").string(),"build-stream","-o",stage_.string(),"--storage",storage,
+                       "--threads",std::to_string(encoder)};
+        int ranges=stream_ranges_;
+        if (const char *value=std::getenv("FASTGA_SHARED_STREAM_RANGES"); value && ranges<0) ranges=std::stoi(value);
+        if (ranges>=0) { merge.push_back("--ranges"); merge.push_back(std::to_string(ranges)); }
+        if (!verifying_) report_["stream_ranges"]=ranges>=0?ranges:4096;
+        merge.insert(merge.end(),extra.begin(),extra.end());
         std::vector<fs::path> streams;
         for (const auto &sample:samples) {
             auto name=sample.at("sample").get<std::string>();
             auto path=work_/(name+(sequential?".stream":".fifo"));
             streams.push_back(path); merge.push_back(name); merge.push_back(path.string());
-            if (!sequential && mkfifo(path.c_str(),0600)<0) fail_errno("create selected-seed FIFO");
+            if (!sequential) { fs::remove(path); if (mkfifo(path.c_str(),0600)<0) fail_errno("create selected-seed FIFO"); }
         }
         report_["stream_transport"]=sequential?"sequential-spool":"fifo";
         if (sequential) report_["spooled_seed_stream_bytes"]=uint64_t(0);
@@ -189,7 +341,7 @@ class FastaBuilder {
         for (size_t i=0; i<samples.size(); ++i) {
             auto name=samples[i].at("sample").get<std::string>();
             auto filter=(i==1)?target_filter:std::map<std::string,std::string>{};
-            auto id=start(name,producer(samples[i],"GIXmake-direct",sequential?1:per_input_),streams[i],filter);
+            auto id=start(name,producer(samples[i],"GIXmake-direct",producers),streams[i],filter);
             if (sequential) {
                 wait({id});
                 report_["spooled_seed_stream_bytes"]=report_["spooled_seed_stream_bytes"].get<uint64_t>()+fs::file_size(streams[i]);
@@ -204,9 +356,10 @@ class FastaBuilder {
         report_["pfp_used"]=true; report_["pfp_toolchain"]=manifest;
         report_["pfp_parameters"]={{"window",10},{"modulus",100}};
         report_["reference"]=samples[0].at("sample");
-        auto prefixes=mark_samples(threads_);
+        auto prefixes=mark_samples();
         auto text=parse_collection(prefixes,false);
         auto copies=work_/"copies", keep=work_/"target.keep";
+        allot("joint-copy",{{"joint-copy",threads_}});
         run("joint-copy",{(binary_/"joint-copy").string(),text.string(),text.string()+".dict",text.string()+".parse",text.string()+".sai",
                           prefixes[0].string(),prefixes[1].string(),copies.string(),keep.string(),std::to_string(threads_)},logs_/"joint-copy.json");
         report_["joint_copies"]=read_json(logs_/"joint-copy.json");
@@ -214,8 +367,7 @@ class FastaBuilder {
         fs::copy_file(prefixes[1].string()+".meta",original);
         std::map<std::string,std::string> filter={{"SXGC_JOINT_KEEP",keep.string()},{"SXGC_JOINT_MARK_PREFIX",prefixes[1].string()}};
         report_["joint_filters"]={{samples[1].at("sample").get<std::string>(),filter}};
-        if (backend()=="native") native_streams("joint-template",filter);
-        else {
+        if (backend()!="native") {
             fs::copy_file(keep,prefixes[1].string()+".bits",fs::copy_options::overwrite_existing);
             auto meta=prefixes[1].string()+".meta";
             if (fs::file_size(meta)<40) throw std::runtime_error("target PFP metadata is truncated");
@@ -225,19 +377,107 @@ class FastaBuilder {
             for (unsigned i=0; i<8; ++i) bytes[i]=static_cast<char>((count>>(8*i))&255);
             output.seekp(32); output.write(bytes.data(),bytes.size()); output.close();
             if (!output) throw std::runtime_error("write residual PFP metadata failed");
-            emit_pfp(prefixes,text,"joint-template");
         }
-        run("joint-pack",{(binary_/"gixshare").string(),"joint-pack",stage_.string(),samples[0].at("sample").get<std::string>(),
-                           samples[1].at("sample").get<std::string>(),copies.string(),prefixes[0].string()+".meta",original.string()},logs_/"joint-pack.json");
-        report_["joint_index"]=read_json(logs_/"joint-pack.json");
+        // The stream producers write the joint bundle themselves. FASTGA_SHARED_JOINT_TWO_STEP=1
+        // restores per-sample v3 archives followed by `gixshare joint-pack` (the byte-level oracle);
+        // FASTGA_SHARED_JOINT_ORACLE=DIR also runs that path on a copy of the staged inputs after
+        // the fused run and copies its bundle files to DIR/two-step; FASTGA_SHARED_JOINT_REPLAY_THREADS=T,T,...
+        // adds a fused run per thread count in DIR/fused-T<t>, for byte comparison (tests only).
+        const bool two_step=std::getenv("FASTGA_SHARED_JOINT_TWO_STEP")!=nullptr;
+        const std::string reference=samples[0].at("sample").get<std::string>(),target=samples[1].at("sample").get<std::string>();
+        auto produce=[&](bool fused) {
+            std::vector<std::string> extra;
+            if (fused) extra={"--joint-copies",copies.string(),"--joint-reference-meta",(prefixes[0].string()+".meta"),"--joint-target-meta",original.string()};
+            if (backend()=="native") native_streams("joint-template",filter,extra);
+            else emit_pfp(prefixes,text,"joint-template",extra);
+        };
+        auto pack=[&] {
+            allot("joint-pack",{{"joint-pack",threads_}});
+            run("joint-pack",{(binary_/"gixshare").string(),"joint-pack",stage_.string(),reference,target,copies.string(),
+                               prefixes[0].string()+".meta",original.string(),"--threads",std::to_string(threads_)},logs_/"joint-pack.json");
+        };
+        std::vector<fs::path> staged;
+        for (const auto &entry:fs::directory_iterator(stage_)) if (entry.is_regular_file()) staged.push_back(entry.path());
+        report_["joint_fused"]=!two_step;
+        produce(!two_step);
+        if (two_step) { pack(); report_["joint_index"]=read_json(logs_/"joint-pack.json"); }
+        else report_["joint_index"]=read_json(logs_/"merge.json").at("joint");
+        if (const char *oracle=std::getenv("FASTGA_SHARED_JOINT_ORACLE")) {
+            if (two_step) throw std::runtime_error("FASTGA_SHARED_JOINT_ORACLE compares against the two-step path; unset FASTGA_SHARED_JOINT_TWO_STEP");
+            fs::path destination=oracle;
+            if (fs::exists(destination)) throw std::runtime_error("oracle output already exists: "+destination.string());
+            fs::create_directories(destination);
+            // Each variant runs on a fresh copy of the staged GDB inputs, so bundles differ only by what is compared.
+            auto variant=[&](const std::string &label, bool fused, int threads, int ranges=-1) {
+                auto fused_stage=stage_; auto fused_logs=logs_; auto *fused_processes=processes_; int fused_threads=threads_;
+                auto restore=[&] { stage_=fused_stage; logs_=fused_logs; processes_=fused_processes; threads_=fused_threads; verifying_=false; stream_ranges_=-1; };
+                Processes quiet(nullptr);
+                auto root=work_/("variant-"+label);
+                fs::create_directories(root/"logs"); fs::create_directories(root/"stage");
+                for (const auto &path:staged) fs::copy_file(path,root/"stage"/path.filename());
+                stage_=root/"stage"; logs_=root/"logs"; processes_=&quiet; threads_=threads; verifying_=true; stream_ranges_=ranges;
+                try { produce(fused); if (!fused) pack(); } catch (...) { restore(); throw; }
+                restore();
+                fs::create_directories(destination/label);
+                for (const auto &entry:fs::directory_iterator(root/"stage"))
+                    if (entry.is_regular_file()) fs::copy_file(entry.path(),destination/label/entry.path().filename());
+                fs::remove_all(root);
+            };
+            variant("two-step",false,threads_);
+            if (const char *list=std::getenv("FASTGA_SHARED_JOINT_REPLAY_THREADS")) {
+                std::stringstream tokens(list); std::string token;
+                while (std::getline(tokens,token,',')) {
+                    int t=std::stoi(token);
+                    if (t<1 || t>threads_) throw std::runtime_error("FASTGA_SHARED_JOINT_REPLAY_THREADS entries must be between 1 and -T");
+                    variant("fused-T"+token,true,t);
+                }
+            }
+            // FASTGA_SHARED_JOINT_REPLAY_RANGES=R,R,...: fused runs at the full budget with these range counts
+            // (0 is the serial consumer loop), in DIR/fused-R<r>.
+            if (const char *list=std::getenv("FASTGA_SHARED_JOINT_REPLAY_RANGES")) {
+                std::stringstream tokens(list); std::string token;
+                while (std::getline(tokens,token,',')) {
+                    int r=std::stoi(token);
+                    if (r<0 || r>65536) throw std::runtime_error("FASTGA_SHARED_JOINT_REPLAY_RANGES entries must be between 0 and 65536");
+                    variant("fused-R"+token,true,threads_,r);
+                }
+            }
+        }
         write_text(stage_/"READY","SXGC joint GIX 4\n");
         if (verify_pfp()!=manifest) throw std::runtime_error("PFP toolchain manifest changed during construction");
+    }
+    // FASTGA_SHARED_RANGES_ORACLE=DIR (tests only, native backend, non-joint storages): reruns the stream
+    // consumer on a copy of the staged inputs for each FASTGA_SHARED_JOINT_REPLAY_RANGES entry (0 is the
+    // serial loop) and copies the resulting files to DIR/ranges-<r>.
+    void replay_ranges(const fs::path &destination, const std::vector<fs::path> &staged, const std::function<void()> &produce) {
+        const char *list=std::getenv("FASTGA_SHARED_JOINT_REPLAY_RANGES");
+        if (!list) throw std::runtime_error("FASTGA_SHARED_RANGES_ORACLE needs FASTGA_SHARED_JOINT_REPLAY_RANGES");
+        if (fs::exists(destination)) throw std::runtime_error("oracle output already exists: "+destination.string());
+        fs::create_directories(destination);
+        std::stringstream tokens(list); std::string token;
+        while (std::getline(tokens,token,',')) {
+            int r=std::stoi(token);
+            if (r<0 || r>65536) throw std::runtime_error("FASTGA_SHARED_JOINT_REPLAY_RANGES entries must be between 0 and 65536");
+            auto fused_stage=stage_; auto fused_logs=logs_; auto *fused_processes=processes_;
+            auto restore=[&] { stage_=fused_stage; logs_=fused_logs; processes_=fused_processes; verifying_=false; stream_ranges_=-1; };
+            Processes quiet(nullptr);
+            auto root=work_/("variant-ranges-"+token);
+            fs::create_directories(root/"logs"); fs::create_directories(root/"stage");
+            for (const auto &path:staged) fs::copy_file(path,root/"stage"/path.filename());
+            stage_=root/"stage"; logs_=root/"logs"; processes_=&quiet; verifying_=true; stream_ranges_=r;
+            try { produce(); } catch (...) { restore(); throw; }
+            restore();
+            fs::create_directories(destination/("ranges-"+token));
+            for (const auto &entry:fs::directory_iterator(root/"stage"))
+                if (entry.is_regular_file()) fs::copy_file(entry.path(),destination/("ranges-"+token)/entry.path().filename());
+            fs::remove_all(root);
+        }
     }
 public:
     FastaBuilder(fs::path binary, fs::path workspace, const Json &config, fs::path scratch, fs::path log_directory={})
         :binary_(std::move(binary)),workspace_(std::move(workspace)),scratch_(std::move(scratch)),config_(config),
          logs_(std::move(log_directory)),
-         threads_(config.at("threads").get<int>()),per_input_(std::max(1,(threads_-1)/static_cast<int>(config.at("inputs").size()))) {}
+         threads_(config.at("threads").get<int>()) {}
     FastaBuilder(const FastaBuilder &)=delete;
     FastaBuilder &operator=(const FastaBuilder &)=delete;
     fs::path build() {
@@ -250,7 +490,7 @@ public:
         auto storage=config_.at("storage").get<std::string>();
         int version=storage=="joint"?4:storage=="source"?3:storage=="positions"?2:1;
         report_={{"status","RUNNING"},{"constructor","native-cpp"},{"backend",backend()=="pfp"?"pfp-bigbwt":"native-sort-stream"},{"storage",storage},
-                 {"format_version",version},{"k",40},{"total_thread_budget",threads_},{"threads_per_input",per_input_},
+                 {"format_version",version},{"k",40},{"total_thread_budget",threads_},{"thread_allocation",Json::object()},
                  {"inputs",Json::array()},{"masks",Json::object()},{"implicit_masks",Json::array()},
                  {"commands",Json::array()},{"native_gix_materialized",false},{"pfp_used",false},{"executables",config_.at("constructor_sha256")}};
         for (const auto &sample:config_.at("inputs")) {
@@ -263,17 +503,33 @@ public:
             Processes processes(&report_); processes_=&processes; save();
             validate_identities(config_);
             std::cerr<<config_.at("driver").get<std::string>()<<": building "<<storage<<" index (C++)\n";
-            for (const auto &sample:config_.at("inputs")) {
-                auto name=sample.at("sample").get<std::string>();
-                run("FAtoGDB-"+name,{(binary_/"FAtoGDB").string(),sample.at("path").get<std::string>(),(stage_/name).string()});
+            {   // Independent single-threaded conversions: outputs are per input.
+                const auto &samples=config_.at("inputs");
+                bool concurrent=samples.size()<=static_cast<size_t>(threads_);
+                std::vector<std::pair<std::string,int>> plan;
+                for (const auto &sample:samples) plan.emplace_back("FAtoGDB-"+sample.at("sample").get<std::string>(),1);
+                allot("convert",plan,concurrent);
+                std::vector<size_t> conversions;
+                for (const auto &sample:samples) {
+                    auto name=sample.at("sample").get<std::string>();
+                    conversions.push_back(start("FAtoGDB-"+name,{(binary_/"FAtoGDB").string(),sample.at("path").get<std::string>(),(stage_/name).string()}));
+                    if (!concurrent) { wait(conversions); conversions.clear(); }
+                }
+                wait(conversions);
             }
             if (storage=="joint") joint();
             else if (backend()=="pfp") independent_pfp(storage);
-            else native_streams(storage);
+            else {
+                std::vector<fs::path> staged;
+                for (const auto &entry:fs::directory_iterator(stage_)) if (entry.is_regular_file()) staged.push_back(entry.path());
+                native_streams(storage);
+                if (const char *oracle=std::getenv("FASTGA_SHARED_RANGES_ORACLE")) replay_ranges(oracle,staged,[&] { native_streams(storage); });
+            }
             validate_identities(config_);
             for (const auto &item:config_.at("constructor_sha256").items())
                 if (sha256(binary_/item.key())!=item.value().get<std::string>()) throw std::runtime_error("executable changed during construction: "+item.key());
             report_["index"]=read_json(logs_/"merge.json");
+            report_["index"].erase("joint"); // recorded as joint_index
             report_["index_files"]=Json::object(); report_["retained_files"]=Json::object();
             uint64_t bytes=0;
             for (const auto &entry:fs::directory_iterator(stage_)) if (entry.is_regular_file()) {

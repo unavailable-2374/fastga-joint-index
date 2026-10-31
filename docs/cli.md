@@ -30,10 +30,20 @@ stderr, and nonzero child exit status is propagated.
 The default is temporary construction followed by cleanup after alignment or
 failure. `-P<directory>` places construction scratch and native alignment scratch
 in that directory. If omitted, `$TMPDIR` or the current directory is used.
-For one or two construction threads, raw seed streams are written sequentially
-before merging so the thread budget is respected. At larger budgets, producers
-and the merge consumer stream concurrently. Neither path writes native GIX/ktab
-intermediate indexes.
+`-T` is a hard construction budget: at every stage the threads that compute in
+concurrently running programs sum to at most `-T` (threads that only wait, such
+as joins or blocked pipe writes, are not counted, as in upstream FastGA). The
+two mark passes run side by side with `T/2` threads each. Native sorting runs
+both producers with `P = max(1, T/12)` threads beside the stream consumer
+(`gixshare build-stream`) with `T-2P` threads (2/2/20 at `-T24`; the consumer
+needs about five times the CPU time of both sorters on the macaque pair, so it
+gets almost the whole budget; `FASTGA_SHARED_NATIVE_SPLIT=P,E` overrides the
+split and is still checked against `-T`); when that cannot give each a thread (`-T1`, `-T2`), raw seed
+streams are spooled sequentially and every step uses the whole budget. PFP
+streams the suffix array from `pfbwt -t A` (A workers, its producing main thread
+and its ordered writer) into `pfp-emit` with `T-A-2` threads; below four threads
+pfbwt runs serially (the fused joint writer gives `pfp-emit` half of the budget). Neither path writes native GIX/ktab intermediate indexes.
+The split of every stage is recorded under `thread_allocation` in `build.json`.
 
 With `-k`, a completed immutable bundle is kept at
 `.fastga-shared/<configuration-sha256>/index` under the current working directory.
@@ -117,3 +127,41 @@ exercises both automatic and standalone construction against corrected native
 decoded records, complete seed-pair multisets and PAF/CIGAR outputs. The dedicated
 standalone suite tests all storage/backend combinations with no Python on PATH.
 These are correctness checks, not biological performance measurements.
+
+## Native stream consumer (`gixshare build-stream`)
+
+`gixshare build-stream ... --ranges R` (default 4096) merges the sorted seed
+streams of the native backend per key range, in parallel on the shared pool.
+A range is a slice of the leading 16 key bits, so it never splits a key. One
+reader thread per stream cuts the stream at range boundaries (these threads are
+`side_threads`, counted inside `--threads`); the main thread lays the ranges end
+to end and cuts every archive, the dictionary and `joint.order` into 4096-row
+blocks at global row numbers. All output files are byte-identical for every `R`
+and every thread count. `--ranges 0` selects the earlier serial loop, kept as
+the byte-level oracle. Memory grows with the rows of the largest range, so a
+very small `R` (for example 1) is meant for small inputs only.
+
+Thread use: `--threads N` counts the computing main thread, the pool workers
+and the one reader thread per stream, so the pool has `N - 1 - (number of
+streams)` workers (none below `--threads 4` with two streams; jobs then run on
+the main thread). Pool jobs never wait on other pool jobs.
+
+Measured on the macaque haplotype pair (3.01e9 rows, `-T24`, joint storage, a
+shared and busy machine, so single runs vary by about 10%): the two sorters
+need about 590 core-seconds (writing to files, the reference stream takes 104 s
+with 8 threads and 220 s with 2; the filtered target stream 46 s and 103 s), the
+consumer about 3000 core-seconds (`--threads 16`: 302 s; `--threads 22`: 210 s;
+`--threads 8`: 608 s; `--ranges` 1024 to 65536 within 220 to 255 s at
+`--threads 20`). The earlier 8/8/8 split therefore waited on the consumer
+(merge stage 601 s); the default `P = max(1, T/12)` gives 2/2/20 and measured
+357 to 421 s for the merge stage (`--ranges` 4096). A 10/10/4 split is much worse
+(1513 s) because four threads leave one pool worker. Rows, files and
+checksums are identical to the serial loop and to the two-step path at both
+splits.
+
+Test and measurement knobs of `GIXmake-shared` / `FastGA-shared`:
+`FASTGA_SHARED_STREAM_RANGES=R` sets `--ranges`;
+`FASTGA_SHARED_JOINT_REPLAY_RANGES=R,R,...` with `FASTGA_SHARED_JOINT_ORACLE=DIR`
+(joint) or `FASTGA_SHARED_RANGES_ORACLE=DIR` (other storages) reruns the consumer
+on a copy of the staged inputs per range count into `DIR/fused-R<r>` or
+`DIR/ranges-<r>` for byte comparison.

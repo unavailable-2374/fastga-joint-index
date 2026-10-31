@@ -1,49 +1,103 @@
 // Included in the gixshare CLI only. Physical archives have already passed v3 checks.
-Bytes joint_metadata(const Metadata&m){
-    Bytes raw(16+m.index.size()*8+36+m.perm.size()*4);put32(raw.data(),40);put32(raw.data()+4,1);put32(raw.data()+8,1);put32(raw.data()+12,3);
-    for(size_t i=0;i<m.index.size();++i)put64(raw.data()+16+i*8,m.index[i]);auto p=raw.data()+16+m.index.size()*8;
-    put32(p,m.post);put32(p+4,m.cont);put32(p+8,1);put64(p+12,m.maxpre);put32(p+20,0);put32(p+24,m.ncontig);for(size_t i=0;i<m.perm.size();++i)put32(p+28+i*4,m.perm[i]);put64(p+28+m.perm.size()*4,UINT64_MAX);return raw;
-}
-void joint_write_view(const fs::path&path,const fs::path&root,unsigned selected,const Metadata&m,const std::vector<int>&amap,const std::vector<int>&bmap){
-    if(fs::exists(path))fail("joint view output already exists: "+path.string());SourceKeys source(path);Bytes h(HEADER);memcpy(h.data(),VIEW_MAGIC,8);put32(h.data()+8,4);put32(h.data()+16,m.csize);put32(h.data()+20,selected);put64(h.data()+24,m.index.back());
-    auto raw=joint_metadata(m),packed=sxgc_positions::compress(raw);put64(h.data()+48,HEADER);put64(h.data()+56,packed.size());put64(h.data()+64,raw.size());put32(h.data()+72,crc(raw));put64(h.data()+80,HEADER+packed.size());source.bind(h);
-    Bytes extra;auto rel=fs::relative(root,path.parent_path()).string();varint(extra,rel.size());extra.insert(extra.end(),rel.begin(),rel.end());for(auto*map:{&amap,&bmap}){varint(extra,map->size());for(auto x:*map){auto at=extra.size();extra.resize(at+4);put32(extra.data()+at,uint32_t(x));}}
-    File order(root/"joint.order");auto order_header=read_at(order.fd,0,HEADER);put32(h.data()+92,u32(order_header.data()+124));
-    put32(h.data()+88,crc(extra));put32(h.data()+124,crc32(0,h.data(),124));auto tmp=path;tmp+=".partial";FILE*f=fopen(tmp.c_str(),"wb");if(!f)fail("create joint view");write(f,h.data(),h.size());write(f,packed.data(),packed.size());write(f,extra.data(),extra.size());if(fflush(f)||fsync(fileno(f))||fclose(f))fail("flush joint view");fs::rename(tmp,path);
-}
+// Varint-pair input form (origin, weight per row) of the same block encoder.
 void joint_order_block(Writer&w,const Bytes&raw,unsigned n){
-    if(!n)return;size_t plane=(n+7)/8;Bytes packed(plane*2),exceptions;size_t at=0;uint64_t last=0,count=0;
-    for(unsigned i=0;i<n;++i){auto origin=take(raw,at),weight=take(raw,at);if(origin)packed[i/8]|=1u<<(i%8);if(weight)packed[plane+i/8]|=1u<<(i%8);if(weight>1){varint(exceptions,i-last);varint(exceptions,weight);last=i;++count;}}
-    if(at!=raw.size())fail("trailing joint weight input");varint(packed,count);packed.insert(packed.end(),exceptions.begin(),exceptions.end());w.block(packed,n);
+    if(!n)return;std::vector<unsigned char>origin(n);std::vector<uint64_t>weight(n);size_t at=0;
+    for(unsigned i=0;i<n;++i){origin[i]=take(raw,at)!=0;weight[i]=take(raw,at);}
+    if(at!=raw.size())fail("trailing joint weight input");w.block(joint_order_raw(origin.data(),weight.data(),n),n);
 }
-void joint_compact_template(const fs::path&path,const Shared&source){
-    auto temporary=path;temporary+=".partial";Writer out(temporary,TEMPLATE_MAGIC,10);out.h=source.a.h;memcpy(out.h.data(),TEMPLATE_MAGIC,8);put32(out.h.data()+8,4);
-    for(auto block:source.a.blocks){auto packed=read_at(source.a.f->fd,block.off,block.packed);block.off=ftello(out.f);out.blocks.push_back(block);out.count+=block.count;write(out.f,packed.data(),packed.size());}
-    auto&m=source.m;Bytes meta(24+uint64_t(m.ncontig)*4);put32(meta.data(),40);put32(meta.data()+4,m.post);put32(meta.data()+8,m.cont);put32(meta.data()+12,m.ncontig);put64(meta.data()+16,out.count);for(int i=0;i<m.ncontig;++i)put32(meta.data()+24+4*i,m.perm[i]);
-    auto packed=sxgc_positions::compress(meta);put64(out.h.data()+48,ftello(out.f));put64(out.h.data()+56,packed.size());put64(out.h.data()+64,meta.size());put32(out.h.data()+72,crc(meta));write(out.f,packed.data(),packed.size());out.finish();fs::rename(temporary,path);
-}
-void joint_pack(const fs::path&root,const std::string&an,const std::string&bn,const fs::path&copy,const fs::path&ameta,const fs::path&bmeta){
-    auto as=std::make_shared<Shared>(root/(an+".gix")),bs=std::make_shared<Shared>(root/(bn+".gix"));if(as->a.version!=3||bs->a.version!=3)fail("joint pack needs v3 reference and residual streams");
-    auto am=pm::Meta::read(ameta.string()),bm=pm::Meta::read(bmeta.string());auto copies=jc::load(copy.string(),am,bm);jc::Intervals tree(copies,am.contigs.size());
-    fs::copy_file(copy,root/"joint.copies");fs::copy_file(ameta,root/"reference.meta");fs::copy_file(bmeta,root/"target.meta");
-    std::unique_ptr<Kmer_Stream,decltype(&sxgc_stream_free)>a(make_stream(as),sxgc_stream_free),b(make_stream(bs),sxgc_stream_free);
-    Writer order(root/"joint.order",ORDER_MAGIC,10);put32(order.h.data()+76,1);Bytes raw;std::vector<JointDirectory>dir;std::vector<int64>bc(1u<<24);uint64_t ar=0,br=0,ac=0,bt=0;unsigned n=0;std::vector<size_t>matches;
-    auto compare=[&](){if(!b->csuf)return true;if(!a->csuf)return false;return a->cpre==b->cpre?memcmp(a->csuf,b->csuf,7)<=0:a->cpre<b->cpre;};
-    while(a->csuf||b->csuf){if(!n)dir.push_back({ar,br,ac,bt});bool fromA=compare();auto s=fromA?a.get():b.get();uint64_t weight=1;
-        if(fromA){auto p=s->csuf+7;uint64_t pos=sxgc_positions::number(p+2,as->m.post),rank=sxgc_positions::number(p+2+as->m.post,as->m.cont);bool rev=rank>>(8*as->m.cont-1);rank&=~(uint64_t(1)<<(8*as->m.cont-1));if(rank>=as->m.perm.size()||(rev&&pos<40))fail("invalid joint pack source coordinate");tree.get(as->m.perm[rank],rev?pos-40:pos,matches);weight=matches.size();++ar;++ac;}
-        else ++br;
-        if(weight>uint64_t(INT64_MAX)-bt||weight>uint64_t(INT64_MAX)-bc[s->cpre])fail("joint frequency overflow");bc[s->cpre]+=weight;bt+=weight;
-        varint(raw,fromA?0:1);varint(raw,weight);if(++n==BLOCK){joint_order_block(order,raw,n);raw.clear();n=0;}sxgc_stream_next(s);
+// Copies the payload blocks of a v3 archive into a template archive. Blocks are
+// read in large contiguous runs; the bytes written are those of a block-by-block copy.
+void joint_compact_write(const fs::path&temporary,const Shared&source){
+    Writer out(temporary,TEMPLATE_MAGIC,10);out.h=source.a.h;memcpy(out.h.data(),TEMPLATE_MAGIC,8);put32(out.h.data()+8,4);
+    const auto&blocks=source.a.blocks;constexpr uint64_t RUN=16u<<20;
+    for(size_t i=0;i<blocks.size();){
+        size_t j=i+1;uint64_t first=blocks[i].off,end=first+blocks[i].packed;
+        while(j<blocks.size()&&blocks[j].off==end&&end+blocks[j].packed-first<=RUN){end+=blocks[j].packed;++j;}
+        auto run=read_at(source.a.f->fd,first,end-first);FILE*f=out.file();uint64_t base=ftello(f);
+        for(size_t k=i;k<j;++k){auto block=blocks[k];block.off=base+(block.off-first);out.blocks.push_back(block);out.count+=block.count;}
+        write(f,run.data(),run.size());i=j;
     }
-    joint_order_block(order,raw,n);dir.push_back({ar,br,ac,bt});if(ac!=am.marks||bt!=bm.marks)fail("joint full occurrence accounting mismatch: reference="+std::to_string(ac)+" target="+std::to_string(bt));
+    auto&m=source.m;Bytes meta(24+uint64_t(m.ncontig)*4);put32(meta.data(),40);put32(meta.data()+4,m.post);put32(meta.data()+8,m.cont);put32(meta.data()+12,m.ncontig);put64(meta.data()+16,out.count);for(int i=0;i<m.ncontig;++i)put32(meta.data()+24+4*i,m.perm[i]);
+    auto packed=sxgc_positions::compress(meta);put64(out.h.data()+48,ftello(out.file()));put64(out.h.data()+56,packed.size());put64(out.h.data()+64,meta.size());put32(out.h.data()+72,crc(meta));write(out.file(),packed.data(),packed.size());out.finish();
+}
+// One sorted input of the merge: 40-mer keys as (bytes 0-7, bytes 8-9) big-endian
+// words, which order exactly like the 3-byte prefix followed by the 7-byte tail.
+struct PackRow{uint64_t hi,lo;};
+struct PackBlock{std::vector<PackRow>keys;std::vector<uint64_t>weights;};
+// Blocks are decoded (zlib, position unpack, key reconstruction and, for the
+// reference, copy-interval weights) on the pool while the merge consumes them in
+// order. At most `window` blocks per input are in flight.
+class PackFeed{
+    std::shared_ptr<Shared>shared;const jc::Intervals*tree;uint64_t nblocks,next=0;size_t window;
+    std::deque<std::future<std::shared_ptr<PackBlock>>>queue;std::shared_ptr<PackBlock>block;size_t at=0;
+    std::shared_ptr<PackBlock> decode(uint64_t b)const{
+        const auto&m=shared->m;unsigned ibyte=m.ibyte,hbyte=m.kmer/4-ibyte,pbyte=hbyte+m.csize;
+        Bytes decoded,keys;uint64_t keyblock=UINT64_MAX;std::vector<uint32_t>prefixes;
+        decode_block(*shared,b,ibyte,hbyte,pbyte,decoded,keys,keyblock,&prefixes);
+        auto out=std::make_shared<PackBlock>();size_t n=prefixes.size();out->keys.resize(n);if(tree)out->weights.resize(n);std::vector<size_t>matches;
+        for(size_t i=0;i<n;++i){
+            auto p=decoded.data()+i*pbyte;uint64_t hi=uint64_t(prefixes[i])<<40;for(unsigned j=0;j<5;++j)hi|=uint64_t(p[j])<<(32-8*j);
+            out->keys[i]={hi,(uint64_t(p[5])<<8)|p[6]};
+            if(tree){auto q=p+hbyte;uint64_t pos=sxgc_positions::number(q+2,m.post),rank=sxgc_positions::number(q+2+m.post,m.cont);bool rev=rank>>(8*m.cont-1);rank&=~(uint64_t(1)<<(8*m.cont-1));
+                if(rank>=m.perm.size()||(rev&&pos<40))fail("invalid joint pack source coordinate");
+                tree->get(m.perm[rank],rev?pos-40:pos,matches);out->weights[i]=matches.size();}
+        }
+        return out;
+    }
+    void fill(){while(queue.size()<window&&next<nblocks){uint64_t b=next++;queue.push_back(spawn([this,b]{return decode(b);}));}}
+public:
+    PackFeed(std::shared_ptr<Shared>s,const jc::Intervals*t,size_t w):shared(std::move(s)),tree(t),nblocks(shared->a.blocks.size()),window(w){
+        if(shared->m.kmer!=40||shared->m.ibyte!=3)fail("joint pack needs 40-mer streams with a 3-byte prefix");
+    }
+    ~PackFeed(){for(auto&f:queue)if(f.valid())f.wait();}
+    // Moves to the next block; false once the input is exhausted.
+    bool load(){fill();if(queue.empty()){block.reset();return false;}block=queue.front().get();queue.pop_front();at=0;fill();return true;}
+    bool step(){return ++at<block->keys.size()||load();}
+    const PackRow&row()const{return block->keys[at];}
+    uint64_t weight()const{return block->weights[at];}
+};
+void joint_pack(const fs::path&root,const std::string&an,const std::string&bn,const fs::path&copy,const fs::path&ameta,const fs::path&bmeta){
+    // All work runs on the main thread or the shared pool, so at most --threads
+    // threads compute; loads stay on main, where their CRCs fan out to the idle pool.
+    const bool parallel=encode_threads>1; // one thread keeps the original serial schedule
+    auto as=std::make_shared<Shared>(root/(an+".gix")),bs=std::make_shared<Shared>(root/(bn+".gix"));
+    auto am=pm::Meta::read(ameta.string()),bm=pm::Meta::read(bmeta.string());auto copies=jc::load(copy.string(),am,bm);jc::Intervals tree(copies,am.contigs.size());
+    if(as->a.version!=3||bs->a.version!=3)fail("joint pack needs v3 reference and residual streams");
+    fs::copy_file(copy,root/"joint.copies");fs::copy_file(ameta,root/"reference.meta");fs::copy_file(bmeta,root/"target.meta");
+    // The template copies read the open v3 archives, so they overlap the merge.
+    auto reference_partial=root/"reference.sgr.partial",residual_partial=root/"residual.sgr.partial";
+    std::future<void>compact_a,compact_b;
+    // Pool futures do not block on destruction; an early failure must still wait
+    // for the copies, which read this frame's archives and paths.
+    struct Join{std::future<void>&a,&b;~Join(){for(auto*f:{&a,&b})if(f->valid())f->wait();}}join{compact_a,compact_b};
+    if(parallel){compact_a=spawn([&]{joint_compact_write(reference_partial,*as);});compact_b=spawn([&]{joint_compact_write(residual_partial,*bs);});}
+    Writer order(root/"joint.order",ORDER_MAGIC,10);put32(order.h.data()+76,1);std::vector<JointDirectory>dir;std::vector<int64>bc(1u<<24);uint64_t ar=0,br=0,ac=0,bt=0;unsigned n=0;
+    struct OrderRows{std::vector<unsigned char>origin=std::vector<unsigned char>(BLOCK);std::vector<uint64_t>weight=std::vector<uint64_t>(BLOCK);};
+    auto rows=std::make_shared<OrderRows>();
+    auto flush=[&]{auto block=std::move(rows);rows=std::make_shared<OrderRows>();unsigned count=n;n=0;
+        order.submit([block,count]{auto raw=joint_order_raw(block->origin.data(),block->weight.data(),count);auto packed=sxgc_positions::compress(raw);auto c=crc(raw);return Encoded{std::move(raw),std::move(packed),c,0,0};},count);};
+    {
+        size_t window=std::max<size_t>(2,encode_threads);PackFeed a(as,&tree,window),b(bs,nullptr,window);bool more_a=a.load(),more_b=b.load();
+        while(more_a||more_b){if(!n)dir.push_back({ar,br,ac,bt});
+            bool fromA=!more_b||(more_a&&(a.row().hi!=b.row().hi?a.row().hi<b.row().hi:a.row().lo<=b.row().lo));
+            const PackRow&key=fromA?a.row():b.row();uint64_t weight=1;
+            if(fromA){weight=a.weight();++ar;++ac;}else ++br;
+            auto prefix=key.hi>>40;
+            if(weight>uint64_t(INT64_MAX)-bt||weight>uint64_t(INT64_MAX)-bc[prefix])fail("joint frequency overflow");bc[prefix]+=weight;bt+=weight;
+            rows->origin[n]=fromA?0:1;rows->weight[n]=weight;if(++n==BLOCK)flush();
+            if(fromA)more_a=a.step();else more_b=b.step();
+        }
+    }
+    if(n)flush();dir.push_back({ar,br,ac,bt});if(ac!=am.marks||bt!=bm.marks)fail("joint full occurrence accounting mismatch: reference="+std::to_string(ac)+" target="+std::to_string(bt));
     // Archives are renamed only after their source-backed readers are finished.
-    a.reset();b.reset();fs::rename(root/(an+".gix"),root/"reference.sgr");fs::rename(root/(bn+".gix"),root/"residual.sgr");
+    if(!parallel){joint_compact_write(reference_partial,*as);joint_compact_write(residual_partial,*bs);}else{compact_a.get();compact_b.get();}
+    fs::rename(root/(an+".gix"),root/"reference.sgr");fs::rename(root/(bn+".gix"),root/"residual.sgr");
     // Only public views need 12-mer prefix indexes. Physical payload archives
     // retain widths/permutations and reuse their already-verified packed blocks.
-    joint_compact_template(root/"reference.sgr",*as);joint_compact_template(root/"residual.sgr",*bs);
+    fs::rename(reference_partial,root/"reference.sgr");fs::rename(residual_partial,root/"residual.sgr");
     Bytes meta;varint(meta,dir.size());for(auto&d:dir)for(auto v:{d.ar,d.br,d.ac,d.bc}){size_t i=meta.size();meta.resize(i+8);put64(meta.data()+i,v);}
     for(const char*name:{"reference.sgr","residual.sgr","reference.meta","target.meta","joint.copies"}){File f(root/name);auto bytes=read_at(f.fd,0,std::string(name).find(".sgr")!=std::string::npos?124:f.size);auto i=meta.size();meta.resize(i+4);put32(meta.data()+i,crc(bytes));}
-    auto packed=sxgc_positions::compress(meta);auto off=ftello(order.f);put64(order.h.data()+48,off);put64(order.h.data()+56,packed.size());put64(order.h.data()+64,meta.size());put32(order.h.data()+72,crc(meta));write(order.f,packed.data(),packed.size());order.finish();
+    auto packed=sxgc_positions::compress(meta);auto off=ftello(order.file());put64(order.h.data()+48,off);put64(order.h.data()+56,packed.size());put64(order.h.data()+64,meta.size());put32(order.h.data()+72,crc(meta));write(order.file(),packed.data(),packed.size());order.finish();
     auto ma=as->m,mb=bs->m;int64 total=0;mb.maxpre=0;for(size_t i=0;i<bc.size();++i){mb.maxpre=std::max<int64_t>(mb.maxpre,bc[i]);total+=bc[i];mb.index[i]=total;}
     std::vector<int>amap(am.contigs.size(),-1),bmap(bm.contigs.size(),-1),emptyA(amap),emptyB(bmap);
     for(size_t i=0;i<amap.size();++i)if(am.contigs[i].forward!=UINT64_MAX)amap[i]=i;for(size_t i=0;i<bmap.size();++i)if(bm.contigs[i].forward!=UINT64_MAX)bmap[i]=i;

@@ -1,8 +1,8 @@
 # Verify every pinned input; prepare patched copies without touching vendor/.
 find_program(SJ_PATCH_EXECUTABLE patch REQUIRED)
 set(_signature "")
-foreach(_name libsais nlohmann-json fastga bigbwt)
-  if(_name STREQUAL "libsais")
+foreach(_name libsais libdeflate nlohmann-json fastga bigbwt)
+  if(_name STREQUAL "libsais" OR _name STREQUAL "libdeflate")
     set(_manifest "${PROJECT_SOURCE_DIR}/vendor/${_name}/PROVENANCE.json")
   else()
     set(_manifest "${PROJECT_SOURCE_DIR}/vendor/${_name}/UPSTREAM.json")

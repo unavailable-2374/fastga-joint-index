@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <vector>
 #include <zlib.h>
+#include <libdeflate.h>
 
 namespace sxgc_positions {
 using Bytes = std::vector<unsigned char>;
@@ -210,11 +211,25 @@ inline Bytes unpack(const Bytes &raw, unsigned codec, unsigned n, unsigned post,
     require(at == raw.size(), "trailing template data");
     return canonical(rows, width);
 }
+// Blocks are zlib-format streams written by libdeflate; any zlib reader decodes
+// them. Each thread keeps its own compressor and decompressor. Level 1: on chr20
+// levels 2 and 4 shrank the index 4-5% but slowed block encoding 25-39%.
+#define SXGC_DEFLATE_LEVEL 1
 inline Bytes compress(const Bytes &raw) {
-    uLongf len = compressBound(raw.size()); Bytes packed(len);
-    if (compress2(packed.data(), &len, raw.data(), raw.size(), Z_BEST_SPEED) != Z_OK)
-        fail("zlib compression failed");
+    struct Compressor { libdeflate_compressor *c=libdeflate_alloc_compressor(SXGC_DEFLATE_LEVEL); ~Compressor(){libdeflate_free_compressor(c);} };
+    thread_local Compressor z;
+    if (!z.c) fail("libdeflate compressor allocation failed");
+    Bytes packed(libdeflate_zlib_compress_bound(z.c, raw.size()));
+    size_t len = libdeflate_zlib_compress(z.c, raw.data(), raw.size(), packed.data(), packed.size());
+    if (!len) fail("libdeflate compression failed");
     packed.resize(len); return packed;
+}
+// Inflates a zlib stream whose decoded size is known exactly; false on any mismatch.
+inline bool inflate_exact(unsigned char *out, size_t size, const unsigned char *in, size_t length) {
+    struct Decompressor { libdeflate_decompressor *d=libdeflate_alloc_decompressor(); ~Decompressor(){libdeflate_free_decompressor(d);} };
+    thread_local Decompressor z;
+    if (!z.d) fail("libdeflate decompressor allocation failed");
+    return libdeflate_zlib_decompress(z.d, in, length, out, size, nullptr) == LIBDEFLATE_SUCCESS;
 }
 struct Packed { Bytes raw, packed; unsigned codec; size_t legacy_bytes; };
 inline Packed pack(const Bytes &raw, unsigned n, unsigned post, unsigned cont) {

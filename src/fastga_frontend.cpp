@@ -70,6 +70,17 @@ Options parse(const Command &arguments) {
 
 Json configuration(const fs::path &binary, const Options &options) {
     Json rows=Json::array();
+    // Digest the input and mask files concurrently, within -T, before the rows are assembled in order.
+    std::map<std::string,std::string> digest;
+    {
+        std::vector<fs::path> files;
+        for (size_t i=0; i<options.inputs.size(); ++i) if (fasta(options.inputs[i])) {
+            files.push_back(fs::canonical(options.inputs[i]));
+            for (const auto &mask:options.masks) if (mask.first==i && !mask.second.empty()) files.push_back(fs::canonical(mask.second));
+        }
+        auto sums=sha256_all(files,options.threads);
+        for (size_t i=0; i<files.size(); ++i) digest[files[i].string()]=sums[i];
+    }
     for (size_t i=0; i<options.inputs.size(); ++i) if (fasta(options.inputs[i])) {
         auto source=fs::canonical(options.inputs[i]);
         bool has_masks=false,implicit=false;
@@ -79,11 +90,11 @@ Json configuration(const fs::path &binary, const Options &options) {
             if (mask.second.empty()) implicit=true;
             else {
                 auto path=fs::canonical(mask.second);
-                masks.push_back({{"path",path.string()},{"sha256",sha256(path)}});
+                masks.push_back({{"path",path.string()},{"sha256",digest.at(path.string())}});
             }
         }
         rows.push_back({{"sample",std::string(1,"AB"[i])},{"position",i},{"path",source.string()},
-                        {"sha256",sha256(source)},{"implicit_mask",!has_masks || implicit},{"masks",masks}});
+                        {"sha256",digest.at(source.string())},{"implicit_mask",!has_masks || implicit},{"masks",masks}});
     }
     BuildSettings settings;
     settings.storage=rows.size()==2?"joint":"source";

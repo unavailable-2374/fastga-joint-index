@@ -1,14 +1,29 @@
 // Included inside namespace sg after Metadata. Reconstructs keys from the
 // unchanged GDB packed bases already required by FastGA alignment.
+// CRC-32 of a mapped file. Large files are split between the calling thread and
+// the shared pool and joined with crc32_combine, which yields the same value as
+// one sequential pass. Callers run on the main thread, never inside a pool job.
+inline uint32_t file_crc(const unsigned char *data,uint64_t size){
+    auto run=[&](uint64_t from,uint64_t to){uLong sum=libdeflate_crc32(0,data+from,to-from);return sum;};
+    unsigned parts=std::min<uint64_t>(encode_threads,size/(32u<<20));
+    if(parts<2)return run(0,size);
+    std::vector<uLong> sums(parts);std::vector<uint64_t> lens(parts);std::vector<std::future<void>> parts_done;uint64_t chunk=((size+parts-1)/parts+(8u<<20)-1)/(8u<<20)*(8u<<20);
+    for(unsigned i=0;i<parts;++i){uint64_t from=std::min<uint64_t>(size,i*chunk),to=std::min<uint64_t>(size,from+chunk);lens[i]=to-from;
+        if(i)parts_done.push_back(spawn([&,i,from,to]{sums[i]=run(from,to);}));}
+    // Waits only for parts still owned here: get() has already released the others.
+    struct Join{std::vector<std::future<void>>&d;~Join(){for(auto&f:d)if(f.valid())f.wait();}}join{parts_done};
+    sums[0]=run(0,lens[0]);
+    for(auto &done:parts_done)done.get();
+    uLong total=sums[0];for(unsigned i=1;i<parts;++i)total=crc32_combine(total,sums[i],lens[i]);
+    return total;
+}
 struct SourceMap {
     File file;const unsigned char *data=nullptr;uint32_t checksum=0;
     explicit SourceMap(const fs::path &path):file(path){
         if(!file.size||file.size>SIZE_MAX)fail("invalid GDB source size: "+path.string());
         auto p=mmap(nullptr,file.size,PROT_READ,MAP_PRIVATE,file.fd,0);
         if(p==MAP_FAILED)fail("map GDB source: "+path.string());data=static_cast<const unsigned char*>(p);
-        uLong sum=crc32(0,nullptr,0);
-        for(uint64_t off=0;off<file.size;){uInt n=std::min<uint64_t>(8u<<20,file.size-off);sum=crc32(sum,data+off,n);off+=n;}
-        checksum=sum;
+        checksum=file_crc(data,file.size);
     }
     ~SourceMap(){if(data)munmap(const_cast<unsigned char*>(data),file.size);}
     SourceMap(const SourceMap&)=delete;
@@ -23,6 +38,8 @@ struct SourceKeys {
       :gdbpath(database(sample)),gdb(gdbpath),bps(sample.parent_path()/("."+sample.stem().string()+".bps")){
         if(gdb.file.size>UINT32_MAX)fail("GDB metadata exceeds source format size limit");
         if(expected)verify(*expected); // Check identity before parsing metadata.
+        // Upstream Read_GDB keeps static state, so concurrent constructions take turns.
+        static std::mutex gdb_reader;std::lock_guard<std::mutex> reading(gdb_reader);
         GDB db{};if(Read_GDB(&db,const_cast<char*>(gdbpath.c_str())))fail("read source GDB");
         try{
             contigs.assign(db.contigs,db.contigs+db.ncontig);
@@ -80,12 +97,18 @@ struct SourceKeys {
 };
 struct SourceCheck {
     SourceKeys source;Metadata coordinates;Bytes restored;
-    SourceCheck(Writer &writer,unsigned k,unsigned post,unsigned cont,const std::vector<int> &perm):source(writer.path){
+    SourceCheck(Writer &writer,unsigned k,unsigned post,unsigned cont,const std::vector<int> &perm):source(writer.identity){
         coordinates.kmer=k;coordinates.post=post;coordinates.cont=cont;
         coordinates.csize=post+cont+2;coordinates.perm=perm;source.bind(writer.h);
     }
     void verify(const Bytes &expected,const Bytes &payload,uint64_t row){
         source.key(coordinates,payload.data(),restored);
         if(restored!=expected)fail("source key/position disagreement at row "+std::to_string(row));
+    }
+    // rows holds n consecutive key+payload records starting at row first; const for encoder threads.
+    void verify_rows(const Bytes &rows,uint64_t first,uint32_t n,unsigned kbytes,unsigned csize)const{
+        Bytes restored;size_t width=kbytes+csize;
+        for(uint32_t i=0;i<n;++i){auto p=rows.data()+i*width;source.key(coordinates,p+kbytes,restored);
+            if(restored.size()!=kbytes||memcmp(restored.data(),p,kbytes))fail("source key/position disagreement at row "+std::to_string(first+i));}
     }
 };

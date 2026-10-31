@@ -52,6 +52,18 @@ def main():
                ('short',[seq[:39],seq[:40],seq[:41],seq[:3000]],[seq[:39],seq[:40],seq[:41],rc(seq[:3000])]),
                ('wide_positions',[seq+dna(40000)],[seq]),
                ('wide_contigs',[dna(300) for _ in range(140)],[seq[:300],rc(seq[300:600]),seq[600:900]])]
+        # SIMULATED: B differs from A by a SNP/small indel every 45..220 bp, so most exact runs hold no complete
+        # PFP phrase (mean phrase ~100 bp). Every B base in an exact run >=40 bp must still be copied.
+        edit_rng=random.Random(8123);dense_a=dna(60000);dense_b=[];breaks=[];cursor=0
+        while cursor<len(dense_a):
+            stretch=min(edit_rng.randint(45,220),len(dense_a)-cursor);dense_b.append(dense_a[cursor:cursor+stretch]);breaks.append(stretch);cursor+=stretch
+            kind=edit_rng.random()
+            if cursor>=len(dense_a):break
+            if kind<.8:dense_b.append(edit_rng.choice([c for c in 'ACGT' if c!=dense_a[cursor]]));breaks.append(-1);cursor+=1
+            elif kind<.9:cursor+=edit_rng.randint(1,3)
+            else:dense_b.append(dna(edit_rng.randint(1,3)));breaks.append(-1)
+        dense_floor=sum(x for x in breaks if x>=40);dense_b=''.join(dense_b)
+        cases.append(('dense_edits',[dense_a],[dense_b]))
         tiny=[dna(80) for _ in range(1000)];cases.extend([('tiny_contigs',tiny,tiny),('homopolymer',['A'*4000],['A'*4000]),('many_copies',[seq[:3000]],[seq[:3000]]*1000)])
         for case,asq,bsq in cases:
             work=root/case;work.mkdir();native=work/'native';native.mkdir()
@@ -71,7 +83,7 @@ def main():
                 report['checks'].append(dict(case=case,backend='native-cpp',sample=name,**checked))
             seed=json.loads(run(case+'-front-seeds',[a.bin/'gixshare','compare-seeds',native/'A.gix',native/'B.gix',audits[0],bundle/'A.gix',bundle/'B.gix',audits[1]]))
             report['checks'].append(dict(case=case,backend='native-cpp',check='complete-seeds-and-PAF',status='PASS',paf_records=len(observed.splitlines()),exact_seed_pairs=seed['exact_seed_pairs']))
-            for backend in (('native','pfp') if case in ('identical','complex','unrelated') else ('native',)):
+            for backend in (('native','pfp') if case in ('identical','complex','unrelated','dense_edits') else ('native',)):
                 joint=work/('joint-'+backend)
                 run(case+'-'+backend+'-build',[a.bin/'GIXmake-shared','--storage','joint','--reference','A','--backend',backend,'--bin',a.bin,'--pfp-tools',a.pfp_tools,'--threads',a.threads,'--input','A='+str(work/'A.fa'),'--input','B='+str(work/'B.fa'),'--output',joint,'--implicit-mask','A','--implicit-mask','B'])
                 for name in ('A','B'):
@@ -114,6 +126,10 @@ def main():
                         try:run(case+'-'+backend+'-'+active+'-only-own-GDB',[a.bin/'gixshare','scan',joint/(active+'.gix')])
                         finally:
                             for x,y in renamed:x.rename(y)
+                if case=='dense_edits':
+                    copied=json.loads((joint/'build.json').read_text())['joint_copies']['copied_bases']
+                    if copied<dense_floor:raise RuntimeError(f'dense TEST copied {copied} bp, below the {dense_floor} bp inside exact runs >=40 bp')
+                    report['checks'].append(dict(case=case,backend=backend,check='copies-cover-all-exact-runs',copied_bases=copied,exact_run_bases=dense_floor,status='PASS'))
                 if case=='identical':
                     stats=json.loads((joint/'build.json').read_text())
                     if stats['joint_copies']['residual_occurrences']!=0:raise RuntimeError('identical TEST unexpectedly retained residual seeds')

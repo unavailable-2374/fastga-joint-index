@@ -5,6 +5,8 @@
 #include <functional>
 #include <zlib.h>
 namespace jc {
+// Sub-phrase re-anchoring: diagonal band (bases) around the flanking copies and maximum refinement rounds.
+constexpr int64_t kBand=1024;constexpr unsigned kRounds=3;
 struct Copy {uint32_t a,b;uint64_t x,y,n;bool reverse;};
 inline void put_number(std::vector<unsigned char>&v,uint64_t x,unsigned n){for(unsigned i=0;i<n;++i){v.push_back(x&255);x>>=8;}}
 inline uint64_t get_number(const std::vector<unsigned char>&v,size_t&p,unsigned n){if(p>v.size()||n>v.size()-p)pm::fail("truncated joint copies");uint64_t x=0;for(unsigned i=0;i<n;++i)x|=uint64_t(v[p++])<<(8*i);return x;}

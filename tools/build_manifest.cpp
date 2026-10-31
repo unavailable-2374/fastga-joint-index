@@ -31,8 +31,8 @@ int main(int argc, char **argv) {
         report["provenance_generator_sha256"]=sha256(root/"tools/build_manifest.cpp");
         const auto bwt=read_json(root/"vendor/bigbwt/UPSTREAM.json");
         Json pfp={{"source",bwt.at("source")},{"revision",bwt.at("revision")},{"sa_value_bytes",5},
-            {"patch_sha256",sha256(root/"patches/bigbwt.patch")},{"parallelism","upstream serial kernels"}};
-        for (const auto name:{"newscan","bwtparse","pfbwt"}) pfp["executables"][name]=sha256(build/"pfp-tools"/name);
+            {"patch_sha256",sha256(root/"patches/bigbwt.patch")},{"parallelism","multithreaded pscan parse; libsais parse SA; libsais dictionary SA/LCP; multithreaded ordered-stream SA expansion"}};
+        for (const auto name:{"newscan","pscan","bwtparse","pfbwt"}) pfp["executables"][name]=sha256(build/"pfp-tools"/name);
         // Publish only complete, successfully measured manifests.
         write_json(build/"build.json.partial",report);
         write_json(build/"pfp-tools/build.json.partial",pfp);

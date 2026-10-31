@@ -26,8 +26,41 @@ These native fixes are part of both reported baselines. Claims of losslessness
 refer to the corrected native implementation, not every unmodified upstream
 build. The patch and exact expected patched-source hashes are reviewable.
 
-`patches/bigbwt.patch` retains the tested upstream serial kernels, removes an
-optional allocation interposer, and preserves the required five-byte SA stream.
+`patches/bigbwt.patch` removes an optional allocation interposer, preserves the
+required five-byte SA stream, and parallelizes the PFP stages without changing
+any output byte. Serial `newscan` remains built as the reference.
+
+Parsing uses a patched `pscan` (sharded dictionary, per-segment parse kept in
+memory, dictionary and parse files written concurrently) with the same 128-bit
+phrase fingerprint as `newscan`; it writes byte-identical `.dict/.occ/.parse/.last/.sai`
+files to serial `newscan` for every thread count, which `tests/test_pfp_parse.py`
+checks.
+
+`bwtparse -p N` sorts the parse with libsais (`libsais_int_omp`) instead of
+gSACA-K; the suffix array of the 0-terminated parse is unique, so it equals the
+serial result. The BWT, `.bwlast`, `.bwsai` and ilist passes run in parallel
+chunks that are written in their serial order.
+
+With `pfbwt -S -t N` the SA expansion runs on N worker threads over contiguous
+dictionary-suffix ranges. Upstream's `bwt_multi` wrote each range with `pwrite`
+at its final offset, which a FIFO cannot accept. The patched version instead
+buffers each range in bounded 1.25 MiB chunks and a single writer thread
+emits the ranges strictly in order with `write(2)`, so the byte stream is
+identical to the serial program and the full SA is still never materialized.
+Buffered SA output is capped by `-M MiB` (default 256) plus two chunks for the
+range being drained and one in-progress chunk per worker; a range of any size
+is produced chunk by chunk.
+
+The dictionary SA and LCP, which upstream builds with the serial gSACA-K, come
+from libsais (`libsais_gsa_omp`, `libsais_plcp_gsa_omp`, `libsais_lcp_omp`) on
+the `-t N` threads (one thread without `-t`). The arrays are identical to
+gSACA-K's: the word separator is mapped to the libsais separator 0, the
+terminal symbol is dropped from the libsais input and entered by hand as
+`SA[0] = |d|-1` with LCP 0, and the 32-bit libsais output is widened in place
+to the 64-bit entries the rest of `pfbwt` uses, so peak memory stays at 16
+bytes per dictionary symbol. `pfbwt -G` selects gSACA-K and `pfbwt -C` builds
+both and aborts unless they are equal; `pfbwt-dict` in ctest checks the
+equality on synthetic dictionaries.
 
 `CORE_SOURCES.json` records the historical integration C/C++ inputs used during
 standalone extraction. Later reader changes are tracked in Git and the actual

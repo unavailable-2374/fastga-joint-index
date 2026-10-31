@@ -38,3 +38,4 @@ READY
 build.json
 *.zip
 *.tar.gz
+/.claude/worktrees/

@@ -2,6 +2,8 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <array>
 #include <chrono>
 #include <cerrno>
@@ -11,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <future>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -98,6 +101,20 @@ inline std::string sha256(const fs::path &path) {
     }
     if (!input.eof()) throw std::runtime_error("SHA256 read failed: " + path.string());
     return hash.finish();
+}
+// Digests of several independent files; at most `threads` files are hashed at once.
+inline std::vector<std::string> sha256_all(const std::vector<fs::path> &paths, int threads) {
+    std::vector<std::string> digests(paths.size());
+    std::vector<std::exception_ptr> failures(paths.size());
+    std::atomic<size_t> next{0};
+    auto work=[&]{ for (size_t i; (i=next++)<paths.size();) try { digests[i]=sha256(paths[i]); } catch (...) { failures[i]=std::current_exception(); } };
+    size_t workers=std::max<size_t>(1,std::min<size_t>(paths.size(),static_cast<size_t>(std::max(threads,1))));
+    std::vector<std::thread> pool;
+    for (size_t i=1; i<workers; ++i) pool.emplace_back(work);
+    work();
+    for (auto &t:pool) t.join();
+    for (auto &failure:failures) if (failure) std::rethrow_exception(failure);
+    return digests;
 }
 inline std::string sha256_text(const std::string &text) {
     Sha256 hash;

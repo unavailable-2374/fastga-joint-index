@@ -37,9 +37,16 @@ function(sj_native target)
   # Keep upstream assertions enabled, including in Release builds.
   target_compile_options(${target} PRIVATE -fno-strict-aliasing -UNDEBUG)
 endfunction()
+# libdeflate writes and reads the zlib-format block streams (pinned in vendor/).
+set(DEFLATE "${PROJECT_SOURCE_DIR}/vendor/libdeflate")
+add_library(sj_deflate STATIC "${DEFLATE}/lib/utils.c" "${DEFLATE}/lib/x86/cpu_features.c" "${DEFLATE}/lib/arm/cpu_features.c"
+  "${DEFLATE}/lib/deflate_compress.c" "${DEFLATE}/lib/deflate_decompress.c" "${DEFLATE}/lib/zlib_compress.c"
+  "${DEFLATE}/lib/zlib_decompress.c" "${DEFLATE}/lib/adler32.c" "${DEFLATE}/lib/crc32.c")
+target_include_directories(sj_deflate PUBLIC "${DEFLATE}")
+set_target_properties(sj_deflate PROPERTIES POSITION_INDEPENDENT_CODE ON)
 function(sj_program target)
   sj_native(${target})
-  target_link_libraries(${target} PRIVATE Threads::Threads ZLIB::ZLIB m)
+  target_link_libraries(${target} PRIVATE sj_deflate Threads::Threads ZLIB::ZLIB m)
 endfunction()
 add_library(gene OBJECT "${FG}/gene_core.c" "${FG}/ONElib.c" "${FG}/GDB.c")
 add_library(alignment OBJECT "${FG}/align.c" "${FG}/alncode.c")
@@ -108,17 +115,36 @@ endif()
 # The PFP tools remain separate processes, as in the validated implementation.
 add_library(bwt_utils OBJECT "${BWT}/utils.c")
 add_library(bwt_gsa OBJECT "${BWT}/gsa/gsacak.c")
-foreach(target bwt_utils bwt_gsa)
+add_library(bwt_xerrors OBJECT "${BWT}/xerrors.c")
+foreach(target bwt_utils bwt_gsa bwt_xerrors)
   target_compile_definitions(${target} PRIVATE M64)
   target_include_directories(${target} PRIVATE "${BWT}")
 endforeach()
 add_executable(newscan "${BWT}/newscan.cpp" $<TARGET_OBJECTS:bwt_utils>)
 target_compile_definitions(newscan PRIVATE NOTHREADS)
-add_executable(bwtparse "${BWT}/bwtparse.c" $<TARGET_OBJECTS:bwt_utils> $<TARGET_OBJECTS:bwt_gsa>)
-target_compile_definitions(bwtparse PRIVATE M64)
-add_executable(pfbwt "${BWT}/pfbwt.cpp" $<TARGET_OBJECTS:bwt_utils> $<TARGET_OBJECTS:bwt_gsa>)
-target_compile_definitions(pfbwt PRIVATE M64 NOTHREADS)
-foreach(target newscan bwtparse pfbwt)
+# pscan is the multithreaded parser used by the builder; newscan stays as the serial reference.
+add_executable(pscan "${BWT}/pscan.cpp" $<TARGET_OBJECTS:bwt_utils> $<TARGET_OBJECTS:bwt_xerrors>)
+add_executable(bwtparse "${BWT}/bwtparse.c" $<TARGET_OBJECTS:bwt_utils> $<TARGET_OBJECTS:bwt_gsa> $<TARGET_OBJECTS:joint_sais>)
+target_compile_definitions(bwtparse PRIVATE M64 SJ_LIBSAIS)
+target_include_directories(bwtparse PRIVATE "${PROJECT_SOURCE_DIR}/vendor/libsais/include")
+if(SJ_ENABLE_OPENMP)
+  # bwtparse: libsais_int_omp suffix sorting plus OpenMP chunk/scatter loops
+  target_compile_definitions(bwtparse PRIVATE SJ_LIBSAIS_OMP)
+  target_link_libraries(bwtparse PRIVATE OpenMP::OpenMP_C)
+endif()
+# pfbwt builds the dictionary SA/LCP with libsais (parallel generalized SA);
+# gSACA-K stays linked for -G (legacy serial path) and -C (equality check).
+add_executable(pfbwt "${BWT}/pfbwt.cpp" $<TARGET_OBJECTS:bwt_utils> $<TARGET_OBJECTS:bwt_gsa> $<TARGET_OBJECTS:bwt_xerrors>
+  $<TARGET_OBJECTS:joint_sais>)
+target_compile_definitions(pfbwt PRIVATE M64)
+target_include_directories(pfbwt PRIVATE "${PROJECT_SOURCE_DIR}/vendor/libsais/include" "${SRC}/pfbwt")
+# dict_sais.hpp widens 32-bit libsais results in place inside the 64-bit arrays.
+target_compile_options(pfbwt PRIVATE -fno-strict-aliasing)
+if(SJ_ENABLE_OPENMP)
+  target_compile_definitions(pfbwt PRIVATE LIBSAIS_OPENMP)
+  target_link_libraries(pfbwt PRIVATE OpenMP::OpenMP_CXX)
+endif()
+foreach(target newscan pscan bwtparse pfbwt)
   target_include_directories(${target} PRIVATE "${BWT}")
   target_link_libraries(${target} PRIVATE Threads::Threads m)
   set_target_properties(${target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/pfp-tools")
@@ -138,11 +164,32 @@ if(BUILD_TESTING)
   sj_program(joint-codec-test)
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/test-results/tmp")
   add_test(NAME codec COMMAND joint-codec-test "${CMAKE_BINARY_DIR}/test-results/weight-frame.bin")
+  # libsais dictionary SA/LCP of pfbwt against gSACA-K, on synthetic dictionaries.
+  add_executable(pfbwt-dict-test "${PROJECT_SOURCE_DIR}/tests/test_pfbwt_dict.cpp"
+    $<TARGET_OBJECTS:bwt_gsa> $<TARGET_OBJECTS:joint_sais>)
+  target_compile_definitions(pfbwt-dict-test PRIVATE M64)
+  target_compile_options(pfbwt-dict-test PRIVATE -fno-strict-aliasing)
+  target_include_directories(pfbwt-dict-test PRIVATE "${BWT}" "${SRC}/pfbwt" "${PROJECT_SOURCE_DIR}/vendor/libsais/include")
+  if(SJ_ENABLE_OPENMP)
+    target_compile_definitions(pfbwt-dict-test PRIVATE LIBSAIS_OPENMP)
+    target_link_libraries(pfbwt-dict-test PRIVATE OpenMP::OpenMP_CXX)
+  endif()
+  add_test(NAME pfbwt-dict COMMAND pfbwt-dict-test)
   set_tests_properties(codec PROPERTIES ENVIRONMENT "SXGC_VERIFY_TMPDIR=${CMAKE_BINARY_DIR}/test-results/tmp;ASAN_OPTIONS=detect_leaks=0;UBSAN_OPTIONS=halt_on_error=1")
 endif()
 if(SJ_PYTHON_TESTS)
   add_test(NAME build-provenance COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_build_provenance.py"
     --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/build-provenance.json")
+  add_test(NAME pfp-parse-equivalence COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_pfp_parse.py"
+    --pfp-tools "${CMAKE_BINARY_DIR}/pfp-tools" --report "${CMAKE_BINARY_DIR}/test-results/pfp-parse.json")
+  add_test(NAME pfp-sort-equivalence COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_pfp_sort.py"
+    --pfp-tools "${CMAKE_BINARY_DIR}/pfp-tools" --report "${CMAKE_BINARY_DIR}/test-results/pfp-sort.json")
+  add_test(NAME thread-budget COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_thread_budget.py"
+    --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/thread-budget.json")
+  add_test(NAME joint-fused-equivalence COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_joint_fused.py"
+    --bin "${CMAKE_BINARY_DIR}" --pfp-tools "${CMAKE_BINARY_DIR}/pfp-tools" --report "${CMAKE_BINARY_DIR}/test-results/joint-fused.json")
+  add_test(NAME stream-ranges COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_stream_ranges.py"
+    --bin "${CMAKE_BINARY_DIR}" --pfp-tools "${CMAKE_BINARY_DIR}/pfp-tools" --report "${CMAKE_BINARY_DIR}/test-results/stream-ranges.json")
   add_test(NAME merge-fasta COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_merge_fasta.py")
   add_test(NAME joint-fixtures COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_joint.py"
     --bin "${CMAKE_BINARY_DIR}" --pfp-tools "${CMAKE_BINARY_DIR}/pfp-tools" --threads 4
@@ -175,5 +222,5 @@ add_custom_target(provenance ALL
   COMMAND build-manifest "${PROJECT_SOURCE_DIR}" "${CMAKE_BINARY_DIR}"
     "${CMAKE_C_COMPILER}" "${CMAKE_CXX_COMPILER}" "$<BOOL:${SJ_ENABLE_OPENMP}>"
   DEPENDS build-manifest FastGA-baseline FastGA-shared GIXmake-shared FastGA-shared-core GIXmake GIXmake-direct GIXmake-marks
-    FAtoGDB ALNtoPAF ALNtoPSL gixshare pfp-emit joint-copy newscan bwtparse pfbwt
+    FAtoGDB ALNtoPAF ALNtoPSL gixshare pfp-emit joint-copy newscan pscan bwtparse pfbwt
   VERBATIM)

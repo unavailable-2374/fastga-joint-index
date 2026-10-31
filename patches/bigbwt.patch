@@ -1,18 +1,2068 @@
 --- a/bwtparse.c
 +++ b/bwtparse.c
-@@ -276,11 +276,13 @@ int main(int argc, char *argv[])
+@@ -7,8 +7,17 @@
+ #include <stdbool.h>
+ #include "gsa/gsacak.h"
+ #include "utils.h" 
+-#if !M64
+-#define LIBSAIS_OPENMP
++#include <stdint.h>
++#include <time.h>
++#ifdef _OPENMP
++#include <omp.h>
++#endif
++// SJ_LIBSAIS: libsais integer-alphabet suffix sorting (multithreaded when the
++// libsais objects are built with LIBSAIS_OPENMP, i.e. SJ_LIBSAIS_OMP)
++#ifdef SJ_LIBSAIS
++#ifdef SJ_LIBSAIS_OMP
++#define LIBSAIS_OPENMP // declare libsais_int_omp
++#endif
+ #include "libsais.h"
+ #endif
  
-   // transform SA->BWT inplace and write remapped last array, and possibly sainfo
+@@ -61,6 +70,10 @@
+ // occ[] (file .occ) and Ilist[] (file .ilist) 
+ 
+ 
++static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+1e-9*t.tv_nsec; }
++static double phase_t0;
++static void phase(const char *what) { double t=now_s(); printf("[phase] %-22s %.2f s\n",what,t-phase_t0); fflush(stdout); phase_t0=t; }
++
+ // -------------------------------------------------------
+ // type used to represent an entry in the SA
+ // this is currently 32 bit or 64 bit according to constant M64 defined in Makefile.
+@@ -68,7 +81,9 @@
+ // which is a 64 bit implementation of the SA-IS algorithm for integer alphabets
+ // (note 32bit sacak would be ok since texts are at most 2^32-2, but we use 64bit 
+ // for possible future extensions to larger texts).
+- typedef uint_t sa_index_t;
++ typedef uint32_t sa_index_t;
++// The SA of a parse of at most 2^32-2 symbols always fits in 32-bit entries.
++// libsais_int needs n+1 <= 2^31-2; larger parses fall back to 64-bit sacak_int.
+ 
+ // -------------------------------------------------------------
+ // struct containing command line parameters and other globals
+@@ -180,29 +195,41 @@
+ 
+ static sa_index_t *compute_SA(uint32_t *Text, long n, long k, int num_threads) 
+ {
+-  #if !M64
+-  assert(n <= 0x7FFFFFFEu); // currently at most 2^31-2 for libsais32
+-  int e ,sa_extra_space = 256*1024; // "reasonble" extra space for libsais_int  
+-  #else 
+-  int sa_extra_space = 0; 
+-  assert(n <= 0xFFFFFFFEu); // currently at most 2^32-2 for gsacak_int
+-  #endif
++  // Text[n-1]=0 is the unique smallest symbol (EOS), so the SA is unique and
++  // identical for libsais_int and sacak_int.
++  assert(n <= 0xFFFFFFFEu); // currently at most 2^32-2
+   if(k>INT32_MAX) die("Alphabet size too large: symbols must be int32_t\n");
+-
+-  sa_index_t *SA = malloc((size_t) (n+sa_extra_space)*sizeof(*SA));
+-  if(SA==NULL) die("malloc failed  (SA)");
++  if(num_threads<1) num_threads = 1;
+   printf("Computing SA of size %ld over an alphabet of size %ld, possibly with %d threads\n",n,k,num_threads);
+ 
+-  #if !M64 
+-  if(num_threads==0) e =  libsais_int((int32_t *) Text, (int32_t *) SA, n, k, sa_extra_space);
+-  else e = libsais_int_omp((int32_t *) Text, (int32_t *) SA, n, k, sa_extra_space, num_threads);
+-  if(e<0) die("Error computing the SA with libsais_int\n");
+-  #else
+-  int depth = sacak_int(Text, SA, n, k);
++  #ifdef SJ_LIBSAIS
++  if(n <= 0x7FFFFFFEl) {
++    // libsais_int keeps its bucket tables (6k entries) in SA[n..n+fs); only with
++    // fs >= 6k are the fast, multithreaded code paths taken (otherwise it falls
++    // back to a serial 1k-bucket induction). Cost: 24k bytes of extra memory.
++    long fs = 6*k + 4096;
++    if(fs > 0x7FFFFFFEl - n) fs = 0x7FFFFFFEl - n; // keeps n+fs within int32
++    sa_index_t *SA = malloc((size_t) (n+fs)*sizeof(*SA));
++    if(SA==NULL) die("malloc failed  (SA)");
++    int32_t e;
++    #ifdef SJ_LIBSAIS_OMP
++    e = libsais_int_omp((int32_t *) Text, (int32_t *) SA, (int32_t) n, (int32_t) k, (int32_t) fs, num_threads);
++    #else
++    e = libsais_int((int32_t *) Text, (int32_t *) SA, (int32_t) n, (int32_t) k, (int32_t) fs);
++    #endif
++    if(e<0) die("Error computing the SA with libsais_int\n");
++    printf("SA computed with libsais_int\n");
++    return SA;
++  }
++  #endif
++  // fallback: 64-bit sacak, then narrow in place (forward order is safe)
++  uint_t *SA64 = malloc((size_t) n*sizeof(*SA64));
++  if(SA64==NULL) die("malloc failed  (SA)");
++  int depth = sacak_int(Text, SA64, n, k);
+   if(depth>=0) printf("SA computed with sacak_int; depth: %d\n", depth);
+   else die("Error computing the SA with sacak_int\n"); 
+-  #endif
+-
++  sa_index_t *SA = (sa_index_t *) SA64;
++  for(long i=0;i<n;i++) SA[i] = (sa_index_t) SA64[i];
+   return SA;
+ }
+ 
+@@ -254,18 +281,23 @@
+   parseArgs(argc,argv,&arg);
+   // start measuring wall clock time 
+   time_t start_wc = time(NULL);
++  phase_t0 = now_s();
++  int nth = arg.threads>0 ? arg.threads : 1;
+   // read parse file
+   Text = read_parse(arg.basename,&n);
+   
++  phase("read parse");
+   // ------- compute largest input symbol (ie alphabet size-1)
+   assert(Text[n]==0); // EOS symbol, don't look at it
+   long k=0;
++  #pragma omp parallel for num_threads(nth) reduction(max:k) schedule(static)
+   for(long i=0;i<n;i++) {
+-    if(Text[i]>k) k = Text[i];
++    if((long) Text[i]>k) k = Text[i];
+   }
+   // -------- alloc and compute SA of the parse
+   sa_index_t *SA = compute_SA(Text,n+1,k+1,arg.threads);
+ 
++  phase("SA");
+   // load last file 
+   uint8_t *last = load_last(&arg,n);
+   // load sa info file, if requested
+@@ -274,31 +306,52 @@
+   FILE *sa_out = open_sa_out(&arg);
+   // note that lastout and sa_out files will have n+1 elements instead of n
+ 
+-  // transform SA->BWT inplace and write remapped last array, and possibly sainfo
++  // transform SA->BWT inplace and write remapped last array, and possibly sainfo.
++  // The entries are independent, so each chunk is computed in parallel into
++  // small buffers that are then written sequentially (output order unchanged).
    sa_index_t *BWTsa = SA; // BWT overlapping SA
 -  assert(n>1);
+-  // first BWT symbol
 +  assert(n>0);
-   // first BWT symbol
    assert(SA[0]==n);
-   BWTsa[0] = Text[n-1];
+-  BWTsa[0] = Text[n-1];
 -  if(fputc(last[n-2],lastout)==EOF) die("bwlast output 1");
-+  // With one phrase, its final content character precedes the empty suffix.
-+  // There is no penultimate phrase, and last[n-2] would read before the array.
-+  if(fputc(last[n==1 ? 0 : n-2],lastout)==EOF) die("bwlast output 1");
-   if(arg.SAinfo) get_and_write_myint(sa_info,n,n-1,sa_out); // ending position+1 of Text[n-1] in original text T (is |T|+w) 
-   // 2nd, 3rd etc BWT symbols 
-   for(long i=1;i<=n;i++) {
+-  if(arg.SAinfo) get_and_write_myint(sa_info,n,n-1,sa_out); // ending position+1 of Text[n-1] in original text T (is |T|+w) 
+-  // 2nd, 3rd etc BWT symbols 
+-  for(long i=1;i<=n;i++) {
+-    if(SA[i]==0) {  
+-      assert(i==1);  // Text[0]=$abc... is the second lex word 
+-      BWTsa[i] = 0;   // eos in BWT, there is no phrase in D corresponding to this symbol so we write dummy values
+-      if(fputc(0,lastout)==EOF) die("bwlast output 2"); // dummy char 
+-      if(arg.SAinfo) write_myint(0,sa_out); // dummy end of word position, it is never used an 0 does not appear elsewhere in sa_out
+-    }
+-    else {
+-      if(SA[i]==1) {
+-        // BWT[i] = Text[0] = $abcd... = first word in the parsing where $ now plays the role of the EOS in the original text  
+-        if(fputc(last[n-1],lastout)==EOF) die("bwlast output 3");
++  {
++    const long CH = 1l<<24;
++    long bufn = (n+1 < CH) ? n+1 : CH;
++    uint8_t *lbuf = malloc(bufn);
++    uint8_t *sbuf = arg.SAinfo ? malloc(bufn*IBYTES) : NULL;
++    if(lbuf==NULL || (arg.SAinfo && sbuf==NULL)) die("malloc failed (output buffers)");
++    for(long c0=0;c0<=n;c0+=CH) {
++      long c1 = (c0+CH < n+1) ? c0+CH : n+1;
++      #pragma omp parallel for num_threads(nth) schedule(static)
++      for(long i=c0;i<c1;i++) {
++        uint8_t lc;     // bwlast char
++        uint64_t u = 0; // bwsai value
++        uint32_t sym;   // BWT symbol
++        if(i==0) {
++          // first BWT symbol, with one phrase its final content character
++          // precedes the empty suffix and there is no penultimate phrase
++          sym = Text[n-1];
++          lc = last[n==1 ? 0 : n-2];
++          if(arg.SAinfo) u = get_myint(sa_info,n,n-1); // ending position+1 of Text[n-1] in original text T (is |T|+w)
++        }
++        else if(SA[i]==0) {
++          assert(i==1);  // Text[0]=$abc... is the second lex word
++          sym = 0;       // eos in BWT, there is no phrase in D corresponding to this symbol so we write dummy values
++          lc = 0;        // dummy char
++          u = 0;         // dummy end of word position, it is never used an 0 does not appear elsewhere in sa_out
++        }
++        else {
++          // SA[i]==1: BWT[i] = Text[0] = $abcd... = first word in the parsing where $ now plays the role of the EOS in the original text
++          lc = (SA[i]==1) ? last[n-1] : last[SA[i]-2];
++          if(arg.SAinfo) u = get_myint(sa_info,n,SA[i]-1); // ending position of BWT symbol in original text
++          sym = Text[SA[i]-1];
++        }
++        lbuf[i-c0] = lc;
++        if(arg.SAinfo) memcpy(sbuf+(size_t)(i-c0)*IBYTES,&u,IBYTES); // same bytes as write_myint
++        BWTsa[i] = sym;
+       }
+-      else    {if(fputc(last[SA[i]-2],lastout)==EOF) die("bwlast output 4");}
+-      if(arg.SAinfo) get_and_write_myint(sa_info,n,SA[i]-1,sa_out); // ending position of BWT symbol in original text
+-      BWTsa[i] = Text[SA[i]-1];
++      if(fwrite(lbuf,1,c1-c0,lastout)!=(size_t)(c1-c0)) die("bwlast output");
++      if(arg.SAinfo && fwrite(sbuf,IBYTES,c1-c0,sa_out)!=(size_t)(c1-c0)) die("sa_out output");
+     }
++    free(lbuf); free(sbuf);
+   }
+   if(fclose(lastout)!=0) die("bwlast close");
+   printf("---- %ld bwlast chars written ----\n",n+1);
+@@ -308,11 +361,13 @@
+     free(sa_info);
+   } 
+   
+-  // --- copy BWT to text array (symbol by symbol since sizeof could be different)
++  // --- copy BWT to text array
+   uint32_t *BWT = Text;
++  #pragma omp parallel for num_threads(nth) schedule(static)
+   for(long i=0;i<=n;i++)
+     BWT[i] = BWTsa[i];
+  
++  phase("bwt+bwlast+bwsai");
+   // read # of occ of each char from file .occ
+   uint32_t *occ = malloc((k+1)*sizeof(*occ)); // extra space for the only occ of 0
+   if(occ==NULL) die("malloc failed (OCC)");
+@@ -331,22 +386,47 @@
+   assert(F[k]+occ[k]==n+1);
+   puts("---- computing inverted list ----");
+   // ----- compute inverse list overwriting SA
++  // IList[F[sym]++] = i for i=0..n in increasing order. Symbols are split into
++  // ranges owning equally sized slices of IList; each range is filled by one
++  // thread scanning BWT in order, so the result equals the serial scatter.
+   uint32_t *IList = (uint32_t *) SA;
+-  for(long i=0;i<=n;i++) {
+-    IList[F[BWT[i]]++] = i;
+-    occ[BWT[i]]--;
++  {
++    int nr = nth;
++    long *bnd = malloc((nr+1)*sizeof(*bnd)); // symbol range boundaries
++    if(bnd==NULL) die("malloc failed (ranges)");
++    bnd[0] = 0; bnd[nr] = k+1;
++    for(int r=1;r<nr;r++) {
++      uint64_t target = ((uint64_t)(n+1)*r)/nr;
++      long lo = bnd[r-1], hi = k+1; // first symbol with F[sym] >= target
++      while(lo<hi) { long mid = lo+(hi-lo)/2; if(F[mid]>=target) hi = mid; else lo = mid+1; }
++      bnd[r] = lo;
++    }
++    #pragma omp parallel for num_threads(nth) schedule(static,1)
++    for(int r=0;r<nr;r++) {
++      uint32_t lo = (uint32_t) bnd[r], span = (uint32_t)(bnd[r+1]-bnd[r]);
++      if(span==0) continue;
++      for(long i=0;i<=n;i++) {
++        uint32_t d = BWT[i]-lo;
++        if(d<span) IList[F[BWT[i]]++] = i;
++      }
++    }
++    free(bnd);
+   }
+-  // ---check
++  // ---check: each symbol was placed exactly occ[] times
++  assert(F[0]==occ[0]);
++  for(long i=1;i<=k;i++) 
++    assert(F[i]==F[i-1]+occ[i]);
++  assert(F[k]==n+1);
+   assert(IList[0]==1); // EOF is in BWT[1] since P[0] = $xxx is the smallest word and appears once
+   assert(BWT[IList[0]]==0);
+-  for(long i=0;i<=k;i++) 
+-    assert(occ[i]==0);
++  phase("ilist scatter");
+   // ---save Ilist   
+   FILE *ilist = open_aux_file(arg.basename,EXTILIST,"wb");
+   s = fwrite(IList,sizeof(*IList),n+1,ilist);
+   if(s!=n+1) die("Ilist write");
+   fclose(ilist);
+   printf("---- %ld ilist positions written (%ld bytes) ----\n",n+1,(n+1)*4l);
++  phase("ilist write");
+   // deallocate
+   free(F);
+   free(occ);
+--- a/newscan.cpp
++++ b/newscan.cpp
+@@ -179,6 +179,18 @@
+   word_int_t rank=0;
+ };
+ 
++// 128-bit phrase fingerprint: two KR hashes of the whole phrase modulo
++// distinct primes < 2**55, so distinct dictionary words collide with
++// probability ~ n^2/2^110 even for genome-scale dictionaries
++struct phrase_hash {
++  uint64_t a, b;
++  bool operator<(const phrase_hash& o) const {
++    return a<o.a || (a==o.a && b<o.b);
++  }
++};
++// fingerprints are written to and read back from the tmp parse file as raw bytes
++static_assert(sizeof(phrase_hash)==16, "phrase_hash must be 16 bytes");
++
+ // -------------------------------------------------------------
+ // struct containing command line parameters and other globals
+ struct Args {
+@@ -245,7 +257,7 @@
+ };
+ // -----------------------------------------------------------
+ 
+-static void save_update_word(Args& arg, string& w, map<uint64_t,word_stats>&  freq, FILE *tmp_parse_file, FILE *last, FILE *sa, uint64_t &pos);
++static void save_update_word(Args& arg, string& w, map<phrase_hash,word_stats>&  freq, FILE *tmp_parse_file, FILE *last, FILE *sa, uint64_t &pos);
+ 
+ #ifndef NOTHREADS
+ #include "newscan.hpp"
+@@ -253,16 +265,17 @@
+ 
+ 
+ 
+-// compute 64-bit KR hash of a string 
+-// to avoid overflows in 64 bit aritmethic the prime is taken < 2**55
+-uint64_t kr_hash(string s) {
+-    uint64_t hash = 0;
+-    //const uint64_t prime = 3355443229;     // next prime(2**31+2**30+2**27)
+-    const uint64_t prime = 27162335252586509; // next prime (2**54 + 2**53 + 2**47 + 2**13)
++// compute 128-bit KR fingerprint of a string 
++// to avoid overflows in 64 bit aritmethic both primes are taken < 2**55
++phrase_hash kr_hash(const string& s) {
++    phrase_hash hash = {0, 0};
++    const uint64_t prime_a = 27162335252586509; // next prime (2**54 + 2**53 + 2**47 + 2**13)
++    const uint64_t prime_b = 36028797018963913; // largest prime < 2**55
+     for(size_t k=0;k<s.size();k++) {
+       int c = (unsigned char) s[k];
+       assert(c>=0 && c< 256);
+-      hash = (256*hash + c) % prime;    //  add char k
++      hash.a = (256*hash.a + c) % prime_a;    //  add char k
++      hash.b = (256*hash.b + c) % prime_b;
+     } 
+     return hash; 
+ }
+@@ -271,7 +284,7 @@
+ 
+ // save current word in the freq map and update it leaving only the 
+ // last minsize chars which is the overlap with next word  
+-static void save_update_word(Args& arg, string& w, map<uint64_t,word_stats>& freq, FILE *tmp_parse_file, FILE *last, FILE *sa, uint64_t &pos)
++static void save_update_word(Args& arg, string& w, map<phrase_hash,word_stats>& freq, FILE *tmp_parse_file, FILE *last, FILE *sa, uint64_t &pos)
+ {
+   size_t minsize = arg.w; 
+   assert(pos==0 || w.size() > minsize);
+@@ -283,7 +296,7 @@
+      w.erase(w.size() - minsize); // erase last minsize chars 
+   
+   // get the hash value and write it to the temporary parse file
+-  uint64_t hash = kr_hash(w);
++  phrase_hash hash = kr_hash(w);
+   if(fwrite(&hash,sizeof(hash),1,tmp_parse_file)!=1) die("parse write error");
+ 
+ #ifndef NOTHREADS
+@@ -330,7 +343,7 @@
+ 
+ // prefix free parse of file fnam. w is the window size, p is the modulus 
+ // use a KR-hash as the word ID that is immediately written to the parse file
+-uint64_t process_file(Args& arg, map<uint64_t,word_stats>& wordFreq)
++uint64_t process_file(Args& arg, map<phrase_hash,word_stats>& wordFreq)
+ {
+   //open a, possibly compressed, input file
+   string fnam = arg.inputFileName;
+@@ -402,7 +415,7 @@
+ 
+ // given the sorted dictionary and the frequency map write the dictionary and occ files
+ // also compute the 1-based rank for each hash
+-void writeDictOcc(Args &arg, map<uint64_t,word_stats> &wfreq, vector<const string *> &sortedDict)
++void writeDictOcc(Args &arg, map<phrase_hash,word_stats> &wfreq, vector<const string *> &sortedDict)
+ {
+   assert(sortedDict.size() == wfreq.size());
+   FILE *fdict, *fwlen=NULL, *focc=NULL;
+@@ -421,7 +434,7 @@
+     const char *word = (*x).data();       // current dictionary word
+     size_t len = (*x).size();  // offset and length of word
+     assert(len>(size_t)arg.w || arg.compress);
+-    uint64_t hash = kr_hash(*x);
++    phrase_hash hash = kr_hash(*x);
+     auto& wf = wfreq.at(hash);
+     assert(wf.occ>0);
+     size_t s = fwrite(word,1,len, fdict);
+@@ -448,7 +461,7 @@
+   if(fclose(fdict)!=0) die("Error closing DICT file");
+ }
+ 
+-void remapParse(Args &arg, map<uint64_t,word_stats> &wfreq)
++void remapParse(Args &arg, map<phrase_hash,word_stats> &wfreq)
+ {
+   // open parse files. the old parse can be stored in a single file or in multiple files
+   mFile *moldp = mopen_aux_file(arg.inputFileName.c_str(), EXTPARS0, arg.th);
+@@ -456,7 +469,7 @@
+ 
+   // recompute occ as an extra check 
+   vector<occ_int_t> occ(wfreq.size()+1,0); // ranks are zero based 
+-  uint64_t hash;
++  phrase_hash hash;
+   while(true) {
+     size_t s = mfread(&hash,sizeof(hash),1,moldp);
+     if(s==0) break;
+@@ -572,7 +585,7 @@
+   time_t start_main = time(NULL);
+   time_t start_wc = start_main;  
+   // init sorted map counting the number of occurrences of each word
+-  map<uint64_t,word_stats> wordFreq;  
++  map<phrase_hash,word_stats> wordFreq;  
+   uint64_t totChar;
+ 
+   // ------------ parsing input file 
+--- a/newscan.hpp
++++ b/newscan.hpp
+@@ -5,7 +5,7 @@
+ 
+ // struct shared via mt_parse
+ typedef struct {
+-  map<uint64_t,word_stats> *wordFreq; // shared dictionary
++  map<phrase_hash,word_stats> *wordFreq; // shared dictionary
+   Args *arg;       // command line input 
+   long start, end; // input
+   long skipped, parsed, words;  // output
+@@ -18,7 +18,7 @@
+   // extract input data
+   mt_data *d = (mt_data *) dx;
+   Args *arg = d->arg;
+-  map<uint64_t,word_stats> *wordFreq = d->wordFreq;
++  map<phrase_hash,word_stats> *wordFreq = d->wordFreq;
+ 
+   if(arg->verbose>1)
+     printf("Scanning from %ld, size %ld\n",d->start,d->end-d->start);
+@@ -89,7 +89,7 @@
+ 
+ // prefix free parse of file fnam. w is the window size, p is the modulus 
+ // use a KR-hash as the word ID that is written to the parse file
+-uint64_t mt_process_file(Args& arg, map<uint64_t,word_stats>& wf)
++uint64_t mt_process_file(Args& arg, map<phrase_hash,word_stats>& wf)
+ {
+   // get input file size 
+   ifstream f(arg.inputFileName, std::ifstream::ate);
+--- a/pscan.cpp
++++ b/pscan.cpp
+@@ -44,6 +44,9 @@
+ #include <random>
+ #include <vector>
+ #include <map>
++#include <thread>
++#include <fcntl.h>
++#include <unistd.h>
+ extern "C" {
+ #include "utils.h"
+ #include "xerrors.h"
+@@ -69,6 +72,17 @@
+   word_int_t rank=0;
+ };
+ 
++// 128-bit phrase fingerprint: two KR hashes of the whole phrase modulo
++// distinct primes < 2**55, so distinct dictionary words collide with
++// probability ~ n^2/2^110 even for genome-scale dictionaries
++struct phrase_hash {
++  uint64_t a, b;
++  bool operator<(const phrase_hash& o) const {
++    return a<o.a || (a==o.a && b<o.b);
++  }
++};
++static_assert(sizeof(phrase_hash)==16, "phrase_hash must be 16 bytes");
++
+ // -------------------------------------------------------------
+ // struct containing command line parameters and other globals
+ struct Args {
+@@ -79,7 +93,6 @@
+    bool compress = false; // parsing called in compress mode 
+    int th=4;              // number of helper threads
+    int verbose=0;         // verbosity level
+-   FILE *tmp_parse_file, *last_file, *sa_file; 
+ };
+ 
+ // -----------------------------------------------------------
+@@ -87,7 +100,7 @@
+ struct MTmaps {
+    int mt_ratio = 3;                       // ratio between #maps and #threads 
+    int n;                                  // number of maps 
+-   vector<map<uint64_t,word_stats>> maps;  // maps
++   vector<map<phrase_hash,word_stats>> maps;  // maps
+    pthread_mutex_t *muts;                  // mutex for each map
+    
+    // constructor
+@@ -115,31 +128,30 @@
+      return s;
+    }
+    
+-   // return the rank of the string associated to hash h
+-   word_int_t rank(uint64_t h) {
+-     return maps[h%n].at(h).rank;
+-   }
+-   
+-  // add the association hash->w to the map hash%n
+-  // using a mutex for exclusive write  
+-  void update(uint64_t hash, string &w);
++  // add the association hash->w to the map hash.a%n
++  // using a mutex for exclusive write; return the (address stable)
++  // entry associated to hash 
++  word_stats *update(const phrase_hash &hash, string &w);
+       
+ };
+ 
+-void MTmaps::update(uint64_t hash, string &w) 
++word_stats *MTmaps::update(const phrase_hash &hash, string &w) 
+ {  
+-  int i = hash % n;
+-  map<uint64_t,word_stats> *freq = &maps[i];
++  int i = hash.a % n;
++  map<phrase_hash,word_stats> *freq = &maps[i];
+   pthread_mutex_t *m = &muts[i]; 
+   xpthread_mutex_lock(m,__LINE__,__FILE__);
+   // update frequency table for current hash
+-  if(freq->find(hash)==freq->end()) {
+-      (*freq)[hash].occ = 1; // new hash
+-      (*freq)[hash].str = w; 
++  auto it = freq->find(hash);
++  word_stats *wfreq;
++  if(it==freq->end()) {
++      wfreq = &(*freq)[hash];  // new hash
++      wfreq->occ = 1; 
++      wfreq->str = w; 
+   }
+   else {
+-      word_stats *wfreq = &(*freq)[hash];  // pointer to the stats for w
+-      wfreq->occ += 1; // known hash
++      wfreq = &it->second;     // known hash
++      wfreq->occ += 1; 
+       if(wfreq->occ <=0) {
+         cerr << "Emergency exit! Maximum # of occurences of dictionary word (";
+         cerr<< MAX_WORD_OCC << ") exceeded\n";
+@@ -152,6 +164,7 @@
+       }
+   }
+   xpthread_mutex_unlock(m,__LINE__,__FILE__);
++  return wfreq;
+ }
+ 
+ 
+@@ -164,7 +177,7 @@
+   int wsize;
+   int *window;
+   int asize;
+-  const uint64_t prime = 1999999973;
++  static constexpr uint64_t prime = 1999999973;
+   uint64_t hash;
+   uint64_t tot_char;
+   uint64_t asize_pot;   // asize^(wsize-1) mod prime 
+@@ -213,17 +226,17 @@
+ // -----------------------------------------------------------
+ 
+ 
+-// compute 64-bit KR hash of a string 
+-// to avoid overflows in 64 bit aritmethic the prime is taken < 2**55
+-// if collisions occur use a prime close to 2**63 and 128 bit variables 
+-uint64_t kr_hash(string s) {
+-    uint64_t hash = 0;
+-    //const uint64_t prime = 3355443229;     // next prime(2**31+2**30+2**27)
+-    const uint64_t prime = 27162335252586509; // next prime (2**54 + 2**53 + 2**47 + 2**13)
++// compute 128-bit KR fingerprint of a string 
++// to avoid overflows in 64 bit aritmethic both primes are taken < 2**55
++phrase_hash kr_hash(const string& s) {
++    phrase_hash hash = {0, 0};
++    const uint64_t prime_a = 27162335252586509; // next prime (2**54 + 2**53 + 2**47 + 2**13)
++    const uint64_t prime_b = 36028797018963913; // largest prime < 2**55
+     for(size_t k=0;k<s.size();k++) {
+       int c = (unsigned char) s[k];
+       assert(c>=0 && c< 256);
+-      hash = (256*hash + c) % prime;    //  add char k
++      hash.a = (256*hash.a + c) % prime_a;    //  add char k
++      hash.b = (256*hash.b + c) % prime_b;
+     } 
+     return hash; 
+ }
+@@ -233,83 +246,175 @@
+ 
+ 
+ 
+-// function used to compare two string pointers
+-bool pstringCompare(const string *a, const string *b)
++// function used to compare two dictionary entries by their word
++static bool pwordLess(const word_stats *a, const word_stats *b)
++{
++  return a->str < b->str;
++}
++
++// sort the dictionary words (all distinct) using nt threads:
++// sort nt contiguous pieces, then merge them pairwise
++static void parallelSortDict(vector<word_stats *> &v, int nt)
++{
++  size_t n = v.size();
++  if(nt<=1 || n<4096) {
++    sort(v.begin(),v.end(),pwordLess);
++    return;
++  }
++  vector<size_t> cut(nt+1);
++  for(int i=0;i<=nt;i++) cut[i] = n/nt*i + std::min<size_t>(i,n%nt);
++  {
++    vector<std::thread> ts;
++    for(int i=0;i<nt;i++)
++      ts.emplace_back([&v,&cut,i]{sort(v.begin()+cut[i],v.begin()+cut[i+1],pwordLess);});
++    for(auto &t: ts) t.join();
++  }
++  for(int step=1;step<nt;step*=2) {
++    vector<std::thread> ts;
++    for(int i=0;i+step<nt;i+=2*step) {
++      size_t lo = cut[i], mid = cut[i+step], hi = cut[std::min(i+2*step,nt)];
++      ts.emplace_back([&v,lo,mid,hi]{inplace_merge(v.begin()+lo,v.begin()+mid,v.begin()+hi,pwordLess);});
++    }
++    for(auto &t: ts) t.join();
++  }
++}
++
++// write n bytes at the given offset of a file descriptor
++static void pwrite_all(int fd, const void *buf, size_t n, int64_t off)
+ {
+-  return *a <= *b;
++  const char *p = (const char *) buf;
++  while(n>0) {
++    ssize_t s = pwrite(fd,p,n,off);
++    if(s<0) die("Error writing output file");
++    p += s; n -= s; off += s;
++  }
+ }
+ 
+-// given the sorted dictionary and the frequency map write the dictionary and occ files
+-// also compute the 1-based rank for each hash
+-void writeDictOcc(Args &arg, MTmaps &mtmaps, vector<const string *> &sortedDict)
++// given the sorted dictionary write the dictionary and occ files
++// also compute the 1-based rank for each word. The dictionary is split into
++// nt pieces written concurrently, each at the offset given by the size of the
++// previous pieces, so the files are identical to those of a sequential write.
++void writeDictOcc(Args &arg, vector<word_stats *> &sortedDict, int nt)
+ {
+-  FILE *fdict, *fwlen=NULL, *focc=NULL;
++  int fdict, fwlen=-1, focc=-1;
+   // open dictionary and occ files
+   if(arg.compress) {
+-    fdict = open_aux_file(arg.inputFileName.c_str(),EXTDICZ,"wb");
+-    fwlen = open_aux_file(arg.inputFileName.c_str(),EXTDZLEN,"wb");
++    fdict = fd_open_aux_file(arg.inputFileName.c_str(),EXTDICZ,O_WRONLY|O_CREAT|O_TRUNC);
++    fwlen = fd_open_aux_file(arg.inputFileName.c_str(),EXTDZLEN,O_WRONLY|O_CREAT|O_TRUNC);
+   }
+   else {
+-    fdict = open_aux_file(arg.inputFileName.c_str(),EXTDICT,"wb");
+-    focc = open_aux_file(arg.inputFileName.c_str(),EXTOCC,"wb");
++    fdict = fd_open_aux_file(arg.inputFileName.c_str(),EXTDICT,O_WRONLY|O_CREAT|O_TRUNC);
++    focc = fd_open_aux_file(arg.inputFileName.c_str(),EXTOCC,O_WRONLY|O_CREAT|O_TRUNC);
+   }
++  size_t n = sortedDict.size();
++  if(nt<1) nt = 1;
++  if(n<4096) nt = 1;
++  vector<size_t> cut(nt+1);                        // pieces of the sorted dictionary
++  for(int i=0;i<=nt;i++) cut[i] = n/nt*i + std::min<size_t>(i,n%nt);
++  const size_t sep = arg.compress ? 0 : 1;         // EndOfWord after each word
+   
+-  word_int_t wrank = 1; // current word rank (1 based)
+-  for(auto x: sortedDict) {
+-    const char *word = (*x).data();       // current dictionary word
+-    size_t len = (*x).size();  // offset and length of word
+-    assert(len>(size_t)arg.w || arg.compress);
+-    uint64_t hash = kr_hash(*x);
+-    auto& wf = (mtmaps.maps[hash%mtmaps.n]).at(hash);
+-    assert(wf.occ>0);
+-    size_t s = fwrite(word,1,len, fdict);
+-    if(s!=len) die("Error writing to DICT file");
+-    if(arg.compress) {
+-      s = fwrite(&len,4,1,fwlen);
+-      if(s!=1) die("Error writing to WLEN file");
+-    }
+-    else {
+-      if(fputc(EndOfWord,fdict)==EOF) die("Error writing EndOfWord to DICT file");
+-      s = fwrite(&wf.occ,sizeof(wf.occ),1, focc);
+-      if(s!=1) die("Error writing to OCC file");
+-    }
+-    assert(wf.rank==0);
+-    wf.rank = wrank++;
++  // size in bytes of the dictionary words of each piece
++  vector<uint64_t> bytes(nt+1,0);
++  {
++    vector<std::thread> ts;
++    for(int i=0;i<nt;i++)
++      ts.emplace_back([&,i]{
++        uint64_t b = 0;
++        for(size_t k=cut[i];k<cut[i+1];k++) b += sortedDict[k]->str.size() + sep;
++        bytes[i+1] = b;
++      });
++    for(auto &t: ts) t.join();
++  }
++  for(int i=0;i<nt;i++) bytes[i+1] += bytes[i];
++  
++  // write the pieces, rank of sortedDict[k] is k+1 
++  {
++    vector<std::thread> ts;
++    for(int i=0;i<nt;i++)
++      ts.emplace_back([&,i]{
++        const size_t flush = 4<<20;
++        string out; out.reserve(flush+(1<<16));
++        vector<uint32_t> lens, occs;
++        uint64_t off = bytes[i];                   // offset in the dictionary file
++        auto emit = [&]{
++          pwrite_all(fdict,out.data(),out.size(),off);
++          off += out.size(); out.clear();
++        };
++        for(size_t k=cut[i];k<cut[i+1];k++) {
++          word_stats *wf = sortedDict[k];
++          assert(wf->str.size()>(size_t)arg.w || arg.compress);
++          assert(wf->occ>0);
++          assert(wf->rank==0);
++          wf->rank = k+1;
++          out.append(wf->str);
++          if(arg.compress) lens.push_back((uint32_t) wf->str.size());
++          else {
++            out.push_back((char) EndOfWord);
++            occs.push_back(wf->occ);
++          }
++          if(out.size()>=flush) emit();
++        }
++        emit();
++        if(arg.compress) pwrite_all(fwlen,lens.data(),lens.size()*4,cut[i]*4);
++        else pwrite_all(focc,occs.data(),occs.size()*sizeof(occ_int_t),cut[i]*sizeof(occ_int_t));
++      });
++    for(auto &t: ts) t.join();
+   }
+   if(arg.compress) {
+-    if(fclose(fwlen)!=0) die("Error closing WLEN file");
++    if(close(fwlen)!=0) die("Error closing WLEN file");
+   }
+   else {
+-    if(fputc(EndOfDict,fdict)==EOF) die("Error writing EndOfDict to DICT file");
+-    if(fclose(focc)!=0) die("Error closing OCC file");
++    char end = (char) EndOfDict;
++    pwrite_all(fdict,&end,1,bytes[nt]);
++    if(close(focc)!=0) die("Error closing OCC file");
+   }
+-  if(fclose(fdict)!=0) die("Error closing DICT file");  
++  if(close(fdict)!=0) die("Error closing DICT file");  
+ }
+ 
+-void remapParse(Args &arg, MTmaps &mtmaps)
++// write the remapped parse file and the .last and .sai files. The segments
++// are written concurrently, each at the offset given by the number of words
++// in the previous segments, so the files are identical to those produced by
++// a sequential scan.
++void writeParseFiles(Args &arg, vector<THdata> &td)
+ {
+-  // open parse files. the old parse can be stored in a single file or in multiple files
+-  mFile *moldp = mopen_aux_file(arg.inputFileName.c_str(), EXTPARS0, arg.th);
+-  FILE *newp = open_aux_file(arg.inputFileName.c_str(), EXTPARSE, "wb");
+-
+-  // recompute occ as an extra check 
+-  vector<occ_int_t> occ(mtmaps.size()+1,0); // ranks are zero based 
+-  uint64_t hash;
+-  while(true) {
+-    size_t s = mfread(&hash,sizeof(hash),1,moldp);
+-    if(s==0) break;
+-    if(s!=1) die("Unexpected parse EOF");
+-    word_int_t rank = mtmaps.rank(hash);
+-    occ[rank]++;
+-    s = fwrite(&rank,sizeof(rank),1,newp);
+-    if(s!=1) die("Error writing to new parse file");
+-  }
+-  if(fclose(newp)!=0) die("Error closing new parse file");
+-  if(mfclose(moldp)!=0) die("Error closing old parse segment");
+-  // check old and recomputed occ coincide
+-  for(auto &m : mtmaps.maps) 
+-    for(auto& x : m)
+-      assert(x.second.occ == occ[x.second.rank]);
++  int nseg = td.size();
++  vector<uint64_t> first(nseg+1,0);   // index of the first word of each segment
++  for(int i=0;i<nseg;i++) first[i+1] = first[i] + td[i].phrases.size();
++  int fd_parse = fd_open_aux_file(arg.inputFileName.c_str(),EXTPARSE,O_WRONLY|O_CREAT|O_TRUNC);
++  int fd_last = -1, fd_sai = -1;
++  if(!arg.compress) {
++    fd_last = fd_open_aux_file(arg.inputFileName.c_str(),EXTLST,O_WRONLY|O_CREAT|O_TRUNC);
++    if(arg.SAinfo) fd_sai = fd_open_aux_file(arg.inputFileName.c_str(),EXTSAI,O_WRONLY|O_CREAT|O_TRUNC);
++  }
++  vector<std::thread> ts;
++  for(int i=0;i<nseg;i++) {
++    ts.emplace_back([&,i]{
++      THdata &d = td[i];
++      const size_t chunk = 1<<20;
++      vector<word_int_t> ranks(std::min(chunk,d.phrases.size()));
++      for(size_t k=0;k<d.phrases.size();k+=chunk) {
++        size_t m = std::min(chunk,d.phrases.size()-k);
++        for(size_t h=0;h<m;h++) ranks[h] = d.phrases[k+h]->rank;
++        pwrite_all(fd_parse,ranks.data(),m*sizeof(word_int_t),(first[i]+k)*sizeof(word_int_t));
++      }
++      if(fd_last>=0) {
++        assert(d.last.size()==d.phrases.size());
++        pwrite_all(fd_last,d.last.data(),d.last.size(),first[i]);
++      }
++      if(fd_sai>=0) {
++        assert(d.sai.size()==d.phrases.size()*IBYTES);
++        pwrite_all(fd_sai,d.sai.data(),d.sai.size(),first[i]*IBYTES);
++      }
++      // release the memory of this segment
++      vector<word_stats *>().swap(d.phrases);
++      vector<uint8_t>().swap(d.last);
++      vector<uint8_t>().swap(d.sai);
++    });
++  }
++  for(auto &t: ts) t.join();
++  if(close(fd_parse)!=0) die("Error closing new parse file");
++  if(fd_last>=0 && close(fd_last)!=0) die("Error closing last file");
++  if(fd_sai>=0 && close(fd_sai)!=0) die("Error closing SA file");
+ }
+  
+ 
+@@ -404,11 +509,12 @@
+   time_t start_wc = start_main;
+   // init multithread maps 
+   MTmaps mtmaps(arg.th);
++  vector<THdata> td;
+   uint64_t totChar;
+ 
+   // ------------ parsing input file 
+   try {
+-    totChar = mt_process_file(arg,mtmaps);
++    totChar = mt_process_file(arg,mtmaps,td);
+   }
+   catch(const std::bad_alloc&) {
+       cout << "Out of memory (parsing phase)... emergency exit\n";
+@@ -429,37 +535,55 @@
+   // -------------- second pass  
+   start_wc = time(NULL);
+   // create array of dictionary words
+-  vector<const string *> dictArray;
+-  dictArray.reserve(totDWord);
++  vector<word_stats *> dictArray(totDWord);
+   // fill array
+   uint64_t sumLen = 0;
+   uint64_t totWord = 0;
+   
+-  // copy words from all maps to the dictionary
+-  for(auto& wordFreq: mtmaps.maps) {
+-    for(auto& x: wordFreq) {
+-      sumLen += x.second.str.size();
+-      totWord += x.second.occ;
+-      dictArray.push_back(&x.second.str);
+-    }
++  // copy words from all maps to the dictionary: each thread handles a set of maps
++  {
++    vector<size_t> first(mtmaps.n+1,0);
++    for(int m=0;m<mtmaps.n;m++) first[m+1] = first[m] + mtmaps.maps[m].size();
++    vector<uint64_t> lenSum(arg.th,0), occSum(arg.th,0);
++    vector<std::thread> ts;
++    for(int t=0;t<arg.th;t++)
++      ts.emplace_back([&,t]{
++        for(int m=t;m<mtmaps.n;m+=arg.th) {
++          size_t at = first[m];
++          for(auto& x: mtmaps.maps[m]) {
++            lenSum[t] += x.second.str.size();
++            occSum[t] += x.second.occ;
++            dictArray[at++] = &x.second;
++          }
++        }
++      });
++    for(auto &t: ts) t.join();
++    for(int t=0;t<arg.th;t++) {sumLen += lenSum[t]; totWord += occSum[t];}
+   }
+   assert(dictArray.size()==totDWord);
++  // extra check: the parse of the segments contains all the words
++  uint64_t parsedWord = 0;
++  for(auto &d: td) parsedWord += d.phrases.size();
++  if(parsedWord!=totWord) die("Inconsistent number of words in the parse");
+   cout << "Sum of lenghts of dictionary words: " << sumLen << endl; 
+   cout << "Total number of words: " << totWord << endl; 
+ 
+   // sort dictionary
+-  sort(dictArray.begin(), dictArray.end(),pstringCompare);
+-  // write plain dictionary and occ file, also compute rank for each hash 
++  parallelSortDict(dictArray,arg.th);
++  // write plain dictionary and occ file, also compute rank for each word 
+   cout << "Writing plain dictionary and occ file\n";
+-  writeDictOcc(arg, mtmaps, dictArray);
++  writeDictOcc(arg, dictArray, arg.th);
+   dictArray.clear(); // reclaim memory
+   cout << "Dictionary construction took: " << difftime(time(NULL),start_wc) << " wall clock seconds\n";  
+     
+   // remap parse file
+   start_wc = time(NULL);
+   cout << "Generating remapped parse file\n";
+-  remapParse(arg, mtmaps);
++  writeParseFiles(arg, td);
+   cout << "Remapping parse file took: " << difftime(time(NULL),start_wc) << " wall clock seconds\n";  
+   cout << "==== Elapsed time: " << difftime(time(NULL),start_main) << " wall clock seconds\n";        
+-  return 0;
++  // all the output files are closed: skip the (slow) destruction of the dictionary
++  cout.flush();
++  fflush(NULL);
++  _exit(0);
+ }
+--- a/pscan.hpp
++++ b/pscan.hpp
+@@ -1,105 +1,141 @@
+-
+ // struct passed to each thread via mt_parse
+ // args and mtmaps are common to all threads
+ // all other variables are private
++//
++// Instead of a temporary parse file holding one fingerprint per word, every
++// thread keeps the words it produced as pointers to the (address stable)
++// entries of the shared dictionary, plus the .last and .sai bytes in memory.
++// Once the dictionary is sorted the pointers give the rank of each word
++// directly and the three files are written at the offset of each segment.
+ typedef struct {
+-  Args *arg;                    // command line input 
+-  MTmaps *mtmaps;               // collection of hash->WordFreq maps  
+-  long start, end;              // input
+-  long skipped, parsed, words;  // output
+-  FILE *tmp_parse_file, *last_file, *sa_file;
++  Args *arg;                    // command line input
++  MTmaps *mtmaps;               // collection of hash->WordFreq maps
++  int64_t start, end;           // input
++  int64_t skipped, parsed, words;  // output
++  bool started;                 // true if this segment produced a (possibly empty) parse
++  vector<word_stats *> phrases; // words of this segment in text order
++  vector<uint8_t> last;         // one byte per word: char at position -(w+1)
++  vector<uint8_t> sai;          // IBYTES bytes per word: ending position+1
+ } THdata;
+ 
+ 
+-// save current word in the freq map and update it leaving only the 
+-// last minsize chars which is the overlap with next word  
+-static void mt_save_update_word(Args &arg,string& w, uint64_t &pos, THdata *d)
++// buffered sequential reader on a segment of the input file
++struct BufReader {
++  int fd;
++  int64_t off;
++  size_t pos = 0, len = 0;
++  vector<char> buf;
++  BufReader(int fd_, int64_t start) : fd(fd_), off(start), buf(1<<20) {}
++  inline int get() {
++    if(pos==len) {
++      ssize_t r = pread(fd,buf.data(),buf.size(),off);
++      if(r<0) die("Error reading input file");
++      if(r==0) return EOF;
++      off += r; len = r; pos = 0;
++    }
++    return (unsigned char) buf[pos++];
++  }
++};
++
++
++// save current word in the freq map and update it leaving only the
++// last minsize chars which is the overlap with next word.
++// Return false if the word is too short and nothing has been saved.
++static bool mt_save_update_word(Args &arg,string& w, uint64_t &pos, THdata *d)
+ {
+-  size_t minsize = arg.w; 
++  size_t minsize = arg.w;
+   assert(pos==0 || w.size() > minsize);
+-  if(w.size() <= minsize) return;
+-  // save overlap 
++  if(w.size() <= minsize) return false;
++  // save overlap
+   string overlap(w.substr(w.size() - minsize)); // keep last minsize chars
+   // if we are compressing, discard the overlap
+   if(arg.compress)
+-     w.erase(w.size() - minsize); // erase last minsize chars 
+-     
+-  // get the hash value and write it to the temporary parse file
+-  uint64_t hash = kr_hash(w);
+-  if(fwrite(&hash,sizeof(hash),1,d->tmp_parse_file)!=1) die("parse write error");
++     w.erase(w.size() - minsize); // erase last minsize chars
+ 
+-  // update the frequency  word w via its hash
+-  d->mtmaps->update(hash,w);
++  // get the 128-bit fingerprint and update the frequency of word w via it
++  phrase_hash hash = kr_hash(w);
++  d->phrases.push_back(d->mtmaps->update(hash,w));
+ 
+-  if(arg.compress) 
+-    pos += w.size(); // if compressing, just update position 
++  if(arg.compress)
++    pos += w.size(); // if compressing, just update position
+   else {
+-    // update last/sa files  
++    // update last/sa files
+     // output char w+1 from the end
+-    if(fputc(w[w.size()- minsize-1],d->last_file)==EOF) die("Error writing to .last file");
+-    // compute ending position +1 of current word and write it to sa file 
+-    // pos is the ending position+1 of the previous word and is updated here 
++    d->last.push_back((uint8_t) w[w.size()- minsize-1]);
++    // compute ending position +1 of current word and save it for the sa file
++    // pos is the ending position+1 of the previous word and is updated here
+     if(pos==0) pos = w.size()-1; // -1 is for the initial $ of the first word
+-    else pos += w.size() - minsize; 
+-    if(d->sa_file) if(fwrite(&pos,IBYTES,1,d->sa_file)!=1) die("Error writing to sa info file");
+-  } 
++    else pos += w.size() - minsize;
++    if(arg.SAinfo) {
++      // the IBYTES low order bytes of pos, little endian, as fwrite does
++      for(int i=0;i<IBYTES;i++) d->sai.push_back((uint8_t) (pos >> (8*i)));
++    }
++  }
+   // keep only the overlapping part of the window
+   w.assign(overlap);
++  return true;
+ }
+ 
+ 
+ 
+ 
+-// function executed by each thread to parse a segment of input files
+-// tmp_parse, last and (optional) sa information is stored 
+-// in a different file for each thread
++// function executed by each thread to parse a segment of the input file.
++// Segment i owns the words ending at the stop windows whose last char has
++// (1-based) position q with start+w <= q < end+w, where [start,end) is the
++// range assigned to the thread: the first word it emits starts with the
++// w chars of the first of these windows (the previous segment emits the word
++// ending there) and its last word is the one ending at the first stop window
++// with q >= end+w. This yields exactly the sequential parse for any number
++// of threads and any range sizes.
+ static void *mt_parse(void *dx)
+ {
+   // extract input data
+   THdata *d = (THdata *) dx;
+   Args *arg = d->arg;
++  int64_t w = arg->w;
+ 
+   if(arg->verbose>1)
+-    printf("Scanning from %ld, size %ld\n",d->start,d->end-d->start);
++    printf("Scanning from %ld, size %ld\n",(long) d->start,(long) (d->end-d->start));
+ 
+-  // open input file 
+-  ifstream f(arg->inputFileName);
+-  if(!f.is_open()) {
+-    perror(__func__);
+-    throw new std::runtime_error("Cannot open file " + arg->inputFileName);
+-  }
++  // open input file
++  int fd = open(arg->inputFileName.c_str(),O_RDONLY);
++  if(fd<0) die(arg->inputFileName.c_str());
++  BufReader f(fd,d->start);
+ 
+-  // prepare for parsing 
+-  f.seekg(d->start); // move to the beginning of assigned region
++  // prepare for parsing
+   KR_window krw(arg->w);
+   int c; string word = "";
+   d->skipped = d->parsed = d->words = 0;
++  d->started = false;
++  uint64_t pos;                    // ending position+1 in text of previous word
+   if(d->start==0) {
+-    if(!arg->compress) word.append(1,Dollar); // no need to reach the next kr-window 
++    if(!arg->compress) word.append(1,Dollar); // no need to reach the next kr-window
++    pos = 0;                       // 0 for the first word
++    d->started = true;
+   }
+-  else {   // reach the next breaking window  
++  else {   // reach the next breaking window
++    bool found = false;
+     while( (c = f.get()) != EOF ) {
+       if(c<=Dollar && !arg->compress) {
+         // if we are not simply compressing then we cannot accept 0,1,or 2
+         cerr << "Invalid char found in input file. Exiting...\n"; exit(1);
+       }
+       d->skipped++;
+-      if(d->start + d->skipped == d->end + arg->w) {f.close(); return NULL;} 
+-      word.append(1,c);
++      // the stop windows ending from here on belong to the next segment
++      if(d->start + d->skipped == d->end + w) break;
+       uint64_t hash = krw.addchar(c);
+-      if(hash%arg->p==0 && d->skipped >= arg->w) break;
++      if(hash%arg->p==0 && d->skipped >= w) {found = true; break;}
+     }
+-    if(c==EOF) {f.close(); return NULL;} // reached EOF without finding a breaking point nothing to do   
+-    d->parsed = arg->w;   // the kr-window is part of the next word
+-    d->skipped -= arg->w; // ... so w less chars have been skipped
+-    word.erase(0,word.size() - arg->w);// keep only the last w chars 
+-  }
+-  // cout << "Skipped: " << d->skipped << endl;
+-  
+-  // there is some parsing to do
+-  uint64_t pos = d->start;             // ending position+1 in text of previous word
+-  if(pos>0) pos+= d->skipped+ arg->w;  // or 0 for the first word
+-  if(arg->SAinfo) assert(IBYTES<=sizeof(pos)); // IBYTES bytes of pos are written to the sa info file 
++    if(!found) {close(fd); return NULL;} // no breaking point in the range: nothing to do
++    d->started = true;
++    d->parsed = w;       // the kr-window is part of the next word
++    d->skipped -= w;     // ... so w less chars have been skipped
++    word = krw.get_window(); // keep only the last w chars
++    // as in newscan, pos is where the next word starts (compress) or where the previous word ends
++    pos = d->start + d->skipped + (arg->compress? 0: w);
++  }
++
++  if(arg->SAinfo) assert(IBYTES<=sizeof(pos)); // IBYTES bytes of pos are written to the sa info file
+   while( (c = f.get()) != EOF ) {
+     if(c<=Dollar && !arg->compress){
+       // if we are not simply compressing then we cannot accept 0,1,or 2
+@@ -108,76 +144,66 @@
+     word.append(1,c);
+     uint64_t hash = krw.addchar(c);
+     d->parsed++;
+-    if(hash%arg->p==0 && d->parsed>arg->w) {
+-      // end of word, save it and write its full hash to the output file
++    if(hash%arg->p==0) {
++      // end of word, save it and its fingerprint in the dictionary
+       // pos is the ending position+1 of previous word and is updated in the next call
+-      mt_save_update_word(*arg,word,pos,d);
+-      d->words++;
+-      if(d->start+d->skipped+d->parsed>=d->end+arg->w) {f.close(); return NULL;}
+-    }    
++      if(mt_save_update_word(*arg,word,pos,d)) d->words++;
++      if(d->start+d->skipped+d->parsed>=d->end+w) {close(fd); return NULL;}
++    }
+   }
+-  // end of file reached 
++  // end of file reached
+   // virtually add w null chars at the end of the file and add the last word in the dict
+   word.append(arg->w,Dollar);
+-  mt_save_update_word(*arg,word,pos,d);
+-  // close input file and return 
+-  f.close();
++  if(mt_save_update_word(*arg,word,pos,d)) d->words++;
++  // as in newscan: the last word ends w virtual chars past EOF unless compressing
++  struct stat st;
++  if(fstat(fd,&st)!=0) die(arg->inputFileName.c_str());
++  if(pos != (uint64_t) st.st_size + (arg->compress? 0: arg->w)) die("Inconsistent end position of the parse");
++  close(fd);
+   return NULL;
+ }
+ 
+ 
+-// multithread prefix free parse of a file 
++// multithread prefix free parse of a file
+ // mtmaps contains a set of dictionaries associating to each
+-// hash value a string and its number of occurrences
+-static uint64_t mt_process_file(Args& arg, MTmaps &mtmaps)
++// fingerprint a string and its number of occurrences.
++// td receives the per-segment results (td.size() is the number of segments)
++static uint64_t mt_process_file(Args& arg, MTmaps &mtmaps, vector<THdata> &td)
+ {
+-  // get input file size 
+-  ifstream f(arg.inputFileName, std::ifstream::ate);
+-  if(!f.is_open()) {
+-    perror(__func__);
+-    throw new std::runtime_error("Cannot open input file " +arg.inputFileName);
+-  }
+-  long size = f.tellg();
+-  f.close();   
++  // get input file size
++  struct stat st;
++  if(stat(arg.inputFileName.c_str(),&st)!=0) die(arg.inputFileName.c_str());
++  int64_t size = st.st_size;
+ 
+-  // prepare and execute threads 
++  // one segment per thread, but never more segments than input bytes so that
++  // all the segments start at distinct positions
+   assert(arg.th>0);
+-  pthread_t t[arg.th];
+-  THdata td[arg.th];
+-  for(int i=0;i<arg.th;i++) {
++  int nseg = (int) std::min<int64_t>(arg.th,std::max<int64_t>(size,1));
++  td.resize(nseg);
++  vector<pthread_t> t(nseg);
++  for(int i=0;i<nseg;i++) {
+     td[i].arg = &arg;
+     td[i].mtmaps = &mtmaps;
+-    td[i].start = i*(size/arg.th); // range start
+-    td[i].end = (i+1==arg.th) ? size : (i+1)*(size/arg.th); // range end
++    td[i].start = i*(size/nseg); // range start
++    td[i].end = (i+1==nseg) ? size : (i+1)*(size/nseg); // range end
+     assert(td[i].end<=size);
+-    // open the 1st pass parsing file 
+-    td[i].tmp_parse_file = open_aux_file_num(arg.inputFileName.c_str(),EXTPARS0,i,"wb");
+-    // open output file containing the char at position -(w+1) of each word
+-    td[i].last_file = arg.compress ? NULL: open_aux_file_num(arg.inputFileName.c_str(),EXTLST,i,"wb");  
+-    // if requested open file containing the ending position+1 of each word
+-    td[i].sa_file = arg.SAinfo ?open_aux_file_num(arg.inputFileName.c_str(),EXTSAI,i,"wb") : NULL;
+     xpthread_create(&t[i],NULL,&mt_parse,&td[i],__LINE__,__FILE__);
+   }
+-  
+-  // wait for the threads to finish (in order) and close output files
+-  long tot_char=0;
+-  for(int i=0;i<arg.th;i++) {
++
++  // wait for the threads to finish
++  int64_t tot_char=0;
++  for(int i=0;i<nseg;i++) {
+     xpthread_join(t[i],NULL,__LINE__,__FILE__);
+     if(arg.verbose) {
+       cout << "s:" << td[i].start << "  e:" << td[i].end << "  pa:";
+       cout << td[i].parsed << "  sk:" << td[i].skipped << "  wo:" << td[i].words << endl;
+     }
+-    // close thread-specific output files     
+-    fclose(td[i].tmp_parse_file);
+-    if(td[i].last_file) fclose(td[i].last_file);
+-    if(td[i].sa_file) fclose(td[i].sa_file);
+-    if(td[i].words>0) {
+-      // extra check
+-      assert(td[i].parsed>arg.w);
+-      tot_char += td[i].parsed - (i!=0? arg.w: 0); //parsed - overlapping 
++    if(td[i].started) {
++      assert(td[i].parsed>=(i!=0? (int64_t) arg.w: 0));
++      tot_char += td[i].parsed - (i!=0? arg.w: 0); //parsed - overlapping
+     }
+     else assert(i>0); // the first thread must produce some words
+   }
+   assert(tot_char==size);
+-  return size;   
++  return size;
+ }
+--- a/pfbwt.cpp
++++ b/pfbwt.cpp
+@@ -28,10 +28,17 @@
+ #include <random>
+ #include <vector>
+ #include <map>
++#include <chrono>
++#include <condition_variable>
++#include <deque>
++#include <mutex>
++#include <thread>
++#include <fcntl.h>
+ extern "C" {
+ #include "gsa/gsacak.h"
+ #include "utils.h"
+ }
++#include "dict_sais.hpp"
+ 
+ using namespace std;
+ // using namespace __gnu_cxx;
+@@ -47,6 +54,9 @@
+    string saExt =     EXTSAI;      // extension file containing sa info   
+    int w = 10;            // sliding window size and its default 
+    int th = 0;            // number of helper threads, default none 
++   int sa_buf_mb = 256;   // with -t: MiB of SA output buffered before the ordered writer
++   bool gsacak = false;   // -G: legacy serial gSACA-K for the dictionary SA/LCP
++   bool check = false;    // -C: build the dictionary SA/LCP both ways and require identical arrays
+    bool SA = false;       // output all SA values
+    int sampledSA = 0;// output sampled SA values
+ };
+@@ -59,7 +69,7 @@
+ static long get_num_words(uint8_t *d, long n);
+ static long binsearch(uint_t x, uint_t a[], long n);
+ static int_t getlen(uint_t p, uint_t eos[], long n, uint32_t *seqid);
+-static void compute_dict_bwt_lcp(uint8_t *d, long dsize,long dwords, int w, uint_t **sap, int_t **lcpp);
++static void compute_dict_bwt_lcp(const Args &arg, uint8_t *d, long dsize,long dwords, uint_t **sap, int_t **lcpp);
+ static void fwrite_chars_same_suffix(vector<uint32_t> &id2merge,  vector<uint8_t> &char2write, uint32_t *ilist, uint32_t *istart, FILE *fbwt, long &easy_bwts, long &hard_bwts);
+ static void fwrite_chars_same_suffix_sa(vector<uint32_t> &id2merge,  vector<uint8_t> &char2write, uint32_t *ilist, uint32_t *istart, FILE *fbwt, long &easy_bwts, long &hard_bwts,
+                                      int_t suffixLen, FILE *safile, uint8_t *bwsainfo,long);
+@@ -120,7 +130,7 @@
+ 
+   // compute sa and bwt of d and do some checking on them 
+   uint_t *sa; int_t *lcp;
+-  compute_dict_bwt_lcp(d,dsize,dwords,arg.w,&sa,&lcp);
++  compute_dict_bwt_lcp(arg,d,dsize,dwords,&sa,&lcp);
+   // Set d[0]==0 as this is the EOF char in the final BWT
+   // since by construction d[] = DollarT[0]T[1].... and no other word starts with Dollar 
+   // and the words in d[] are lexicographically sorted
+@@ -261,7 +271,10 @@
+         << "\t-w W\tsliding window size, def. " << args.w << endl
+         #ifndef NOTHREADS
+         << "\t-t M\tnumber of helper threads, def. none " << endl
++        << "\t-M B\twith -t, MiB of SA output buffered ahead of the ordered writer, def. " << args.sa_buf_mb << endl
+         #endif
++        << "\t-G  \tbuild the dictionary SA/LCP with the serial gSACA-K instead of parallel libsais" << endl
++        << "\t-C  \tbuild the dictionary SA/LCP with both and abort unless identical" << endl
+         << "\t-h  \tshow help and exit" << endl
+         << "\t-s  \tcompute sampled suffix array" << endl
+         << "\t-S  \tcompute full suffix array" << endl;
+@@ -279,7 +292,7 @@
+   puts("");
+ 
+    string sarg;
+-   while ((c = getopt( argc, argv, "t:w:sehS") ) != -1) {
++   while ((c = getopt( argc, argv, "t:M:w:sehSGC") ) != -1) {
+       switch(c) {
+         case 's':
+         arg.sampledSA |= START_RUN; break; // record SA position for start of runs 
+@@ -287,12 +300,19 @@
+         arg.sampledSA |= END_RUN; break;  // record SA position for end of runs 
+         case 'S':
+         arg.SA = true; break;
++        case 'G':
++        arg.gsacak = true; break;
++        case 'C':
++        arg.check = true; break;
+         case 'w':
+         sarg.assign( optarg );
+         arg.w = stoi( sarg ); break;
+         case 't':
+         sarg.assign( optarg );
+         arg.th = stoi( sarg ); break;
++        case 'M':
++        sarg.assign( optarg );
++        arg.sa_buf_mb = stoi( sarg ); break;
+         case 'h':
+            print_help(argv, arg); exit(1);
+         case '?':
+@@ -327,6 +347,10 @@
+      cout << "Number of threads cannot be negative\n";
+      exit(1);
+    }
++   if(arg.sa_buf_mb<1) {
++     cout << "The SA buffer must be at least 1 MiB\n";
++     exit(1);
++   }
+    #endif
+ }
+ 
+@@ -486,48 +510,85 @@
+   return eos[*seqid] - p;
+ }
+ 
+-// compute the SA and LCP array for the set of (unique) dictionary words
+-// using gSACA-K. Also do some checking based on the number and order of the special symbols
++// compute the SA and LCP array for the set of (unique) dictionary words.
++// Also do some checking based on the number and order of the special symbols
+ // d[0..dsize-1] is the dictionary consisting of the concatenation of dictionary words
+-// in lex order with EndOfWord (0x1) at the end of each word and 
++// in lex order with EndOfWord (0x1) at the end of each word and
+ // d[size-1] = EndOfDict (0x0) at the very end. It is d[0]=Dollar (0x2)
+ // since the first word starts with $. There is another word somewhere
+ // ending with Dollar^wEndOfWord (it is the last word in the parsing,
+-// but its lex rank is unknown).  
+-// Note, we use gsacak rather than gsais, since according to the authors
+-// (10.1016/j.tcs.2017.03.039) the former is faster and uses less memory
+-static void compute_dict_bwt_lcp(uint8_t *d, long dsize,long dwords, int w, 
++// but its lex rank is unknown).
++//
++// The arrays are those of gSACA-K (gsacak, 10.1016/j.tcs.2017.03.039): the
++// EndOfWord symbols are all distinct and ordered by position, the terminal
++// EndOfDict is the smallest symbol, and LCP[i] counts the matching symbols
++// of SA[i] and SA[i-1] without the separator that ends both. gsacak is
++// serial, so the default path is the parallel libsais generalized SA:
++// libsais_gsa ranks every 0 as a separator, ordered by position, and its
++// PLCP/LCP stop at a 0 as well. Mapping EndOfWord to 0 therefore gives the
++// same order for every suffix that starts with a non-separator symbol. The
++// terminal EndOfDict is dropped from the libsais input (libsais has no empty
++// strings, and the last 0 must end the last word) and is entered by hand as
++// SA[0] = dsize-1 with LCP 0, which shifts the libsais arrays by one.
++// Comparing two suffixes never reads past a separator, so the shift changes
++// no order; the LCP of two separator suffixes is 0 in both.
++// -G selects gsacak, -C builds both and aborts unless the arrays are equal.
++
++
++static void compute_dict_bwt_lcp(const Args &arg, uint8_t *d, long dsize,long dwords,
+                           uint_t **sap, int_t **lcpp) // output parameters
+ {
++  const int w = arg.w; (void) w;
+   uint_t *sa = new uint_t[dsize];
+   int_t *lcp = new int_t[dsize];
+-  (void) dwords; (void) w;
+ 
+   cout  << "Each SA entry: " << sizeof(*sa) << " bytes\n";
+   cout  << "Each LCP entry: " << sizeof(*lcp) << " bytes\n";
+ 
+-  cout << "Computing SA and LCP of dictionary" << endl; 
++  cout << "Computing SA and LCP of dictionary" << endl;
+   time_t  start = time(NULL);
+-  gsacak(d,sa,lcp,NULL,dsize);
+-  cout << "Computing SA/LCP took " << difftime(time(NULL),start) << " wall clock seconds\n";  
++  const bool use_gsacak = arg.gsacak || sizeof(uint_t)!=8 || sizeof(int_t)!=8;
++  const int th = arg.th>1 ? arg.th : 1;
++  if(use_gsacak)
++    gsacak(d,sa,lcp,NULL,dsize);
++  else
++    sj_dict_sais(d,dsize,dwords,th,getenv("PFBWT_LIBSAIS64")!=NULL,sa,lcp);
++  cout << "Computing SA/LCP took " << difftime(time(NULL),start) << " wall clock seconds\n";
++  if(arg.check && !use_gsacak) {
++    uint_t *sa2 = new uint_t[dsize];
++    int_t *lcp2 = new int_t[dsize];
++    gsacak(d,sa2,lcp2,NULL,dsize);
++    long bad_sa = -1, bad_lcp = -1;
++    for(long i=0;i<dsize;i++) {
++      if(bad_sa<0 && sa[i]!=sa2[i]) bad_sa = i;
++      if(bad_lcp<0 && lcp[i]!=lcp2[i]) bad_lcp = i;
++    }
++    if(bad_sa>=0 || bad_lcp>=0) {
++      cerr << "libsais and gSACA-K dictionary arrays differ: first SA index " << bad_sa
++           << ", first LCP index " << bad_lcp << "\n";
++      exit(EXIT_FAILURE);
++    }
++    cout << "Check: libsais and gSACA-K dictionary SA/LCP are identical (" << dsize << " entries)" << endl;
++    delete[] sa2; delete[] lcp2;
++  }
+   // ------ do some checking on the sa
+   assert(d[dsize-1]==EndOfDict);
+-  assert(sa[0]==(unsigned long)dsize-1);// sa[0] is the EndOfDict symbol 
+-  for(long i=0;i<dwords;i++) 
+-    assert(d[sa[i+1]]==EndOfWord); // there are dwords EndOfWord symbols 
+-  // EndOfWord symbols are in position order, so the last is d[dsize-2]    
+-  assert(sa[dwords]==(unsigned long)dsize-2);  
+-  // there are wsize+1 $ symbols: 
++  assert(sa[0]==(unsigned long)dsize-1);// sa[0] is the EndOfDict symbol
++  for(long i=0;i<dwords;i++)
++    assert(d[sa[i+1]]==EndOfWord); // there are dwords EndOfWord symbols
++  // EndOfWord symbols are in position order, so the last is d[dsize-2]
++  assert(sa[dwords]==(unsigned long)dsize-2);
++  // there are wsize+1 $ symbols:
+   // one at the beginning of the first word, wsize at the end of the last word
+   for(long i=0;i<=w;i++)
+-    assert(d[sa[i+dwords+1]]==Dollar);         
+-  // in sa[dwords+w+1] we have the first word in the parsing since that $ is the lex. larger  
++    assert(d[sa[i+dwords+1]]==Dollar);
++  // in sa[dwords+w+1] we have the first word in the parsing since that $ is the lex. larger
+   assert(d[0]==Dollar);
+   assert(sa[dwords+w+1]==0);
+   assert(d[sa[dwords+w+2]]>Dollar);  // end of Dollar chars in the first column
+-  assert(lcp[dwords+w+2]==0); 
++  assert(lcp[dwords+w+2]==0);
+   // copy sa and lcp address
+-  *sap = sa;  *lcpp = lcp;  
++  *sap = sa;  *lcpp = lcp;
+ }
+ 
+ 
+--- a/pfthreads.hpp
++++ b/pfthreads.hpp
+@@ -6,6 +6,11 @@
+ #include "xerrors.h"
+ }
+ #include <fcntl.h>
++#include <condition_variable>
++#include <chrono>
++#include <deque>
++#include <mutex>
++#include <thread>
+ 
+ #define Buf_size 40
+ #define Min_bwt_range 100000
+@@ -13,8 +18,6 @@
+ 
+ //static size_t get_bwt_size(char *name);
+ static int get_bwt_fd(char *name);
+-static int get_sa_fd(char *name);
+-static void fd_write(int fd, uint8_t *b,long towrite,long start);
+ static void pc_init(sem_t *free_slots, sem_t *data_items, pthread_mutex_t *m);
+ static void pc_destroy(sem_t *free_slots, sem_t *data_items, pthread_mutex_t *m);
+ void sa2da(uint_t sa[], int_t lcp[], uint8_t d[], long dsize, long dwords, int w, int numt);
+@@ -175,94 +178,183 @@
+   long count;      // chars to be written to the output bwt;
+ } da_range;
+ 
+-// working data to be passed to each consumer thread
+-typedef struct {
++// --------------------------------------------------------------------
++// Ordered streaming construction of the final BWT and SA from dict and parse.
++//
++// The dictionary SA is cut into ranges of consecutive suffixes; every range
++// maps to a contiguous slice of the final BWT/SA (see da_range). Worker
++// threads expand ranges independently, in bounded chunks. BWT bytes are
++// written with pwrite at their final offset (any seekable target, including
++// /dev/null). SA values are never written at an offset: each worker appends
++// 5-byte chunks to its range, and a single writer thread drains the ranges
++// strictly in range order with write(2). The SA output may therefore be a
++// FIFO, and the byte stream is identical to the serial program.
++//
++// Memory is bounded: buffered SA bytes never exceed Args::sa_buf_mb plus
++// two chunks for the range currently being written plus one in-progress
++// chunk per worker. A worker that would exceed the budget blocks, except
++// the worker holding the range the writer is draining (limited to two
++// buffered chunks), which guarantees progress. A range of any size is
++// produced chunk by chunk, so a huge occurrence list is never held whole.
++
++#define Stream_chunk_entries (1L<<18)   // entries per chunk
++#define Stream_todo_per_thread 4        // ranges queued ahead of the workers
++
++struct sa_chunk { uint8_t *data; size_t bytes; };
++struct range_state {
++  da_range r;
++  std::deque<sa_chunk> chunks;   // SA chunks produced and not yet written
++  size_t queued;                 // bytes in chunks
++  bool done;                     // the worker has produced the whole range
++};
++
++// working data to be passed to each worker thread and to the writer
++struct thread_data {
+   uint8_t *dict;       // dictionary
+   uint_t *da, *eos;    // document array, eos positions
+-  int_t *suflen, *wlen; // suffix lengths, length of words 
+-  long dsize;          // size of dict[] da[] suflen[]  
+-  long dwords;         // number of words in the dictionary size of eos[] wlen[] 
+-  uint8_t *last;       // array of last symbols 
+-  uint32_t *ilist;     // inverted list 
+-  uint32_t *istart;    // starting positions inside inverted list 
++  int_t *suflen, *wlen; // suffix lengths, length of words
++  long dsize;          // size of dict[] da[] suflen[]
++  long dwords;         // number of words in the dictionary size of eos[] wlen[]
++  uint8_t *last;       // array of last symbols
++  uint32_t *ilist;     // inverted list
++  uint32_t *istart;    // starting positions inside inverted list
+   int w;               // window size
+-  da_range buffer[Buf_size]; // shared producer/consumer buffer 
+-  int cindex;                // consumer index in buffer
+-  pthread_mutex_t cons_m;    // mutex and semaphores 
+-  sem_t free_slots, data_items;
+-  int bwt_fd;                // file descriptor for the bwt output file  
+-  bool SA;                   // if true the full SA is required 
+-  int sa_fd;                 // file descriptor for the sa output file  
+-  uint8_t *bwsainfo;         // positions in the origina text of parsed words
+-  long psize;                // size of bwsainfo
+-  long full_words;           // output parameters, access with a mutex_consumer
+-  long easy_bwts; 
+-  long hard_bwts; 
+-} thread_data;
+-
+-
+-// write to the bwt all the characters preceding a given suffix
+-// doing a merge operation if necessary
+-static void write_chars_same_suffix(vector<uint32_t> &id2merge,  vector<uint8_t> &char2write, 
+-                                    uint32_t *ilist, uint32_t *istart,
+-                                    uint8_t *bwt, long &c, long &easy_bwts, long &hard_bwts)
++  int bwt_fd;          // file descriptor for the bwt output file
++  bool SA;             // if true the full SA is required
++  char *basename;      // the SA stream is opened by the writer thread
++  uint8_t *bwsainfo;   // positions in the origina text of parsed words
++  long psize;          // size of bwsainfo
++  long full_words;     // output parameters, access with m
++  long easy_bwts;
++  long hard_bwts;
++  // ordered stream, all protected by m
++  std::mutex m;
++  std::condition_variable cv_todo, cv_prod, cv_budget, cv_writer;
++  std::deque<range_state *> table;  // unfinished ranges; table[0] has id table_base
++  long table_base;
++  std::deque<long> todo;            // ids dispatched to workers, in order
++  long next_id;
++  bool producer_done;
++  long head;                        // id of the range being written
++  size_t used, budget, chunk_bytes, peak_used;
++  double wait_budget_s, writer_wait_s, writer_write_s;
++  uint64_t bytes_out;
++};
++
++static double now_s()
++{
++  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++
++// write towrite bytes from buffer b in file descriptor fd starting from offset start
++static void fd_write(int fd, uint8_t *b,long towrite,long start)
++{
++  long c = 0;
++  while(towrite>0) {
++    long written = pwrite(fd,b+c,towrite,start);
++    if(written<0) { if(errno==EINTR) continue; die("pwrite error (1)"); }
++    if(written>towrite) die("pwrite error (2)");
++    towrite -= written;
++    start += written;
++    c += written;
++  }
++}
++
++// sequential write of the SA stream (the target can be a pipe)
++static void fd_write_stream(int fd, const uint8_t *b, size_t towrite)
++{
++  while(towrite>0) {
++    ssize_t written = write(fd,b,towrite);
++    if(written<0) { if(errno==EINTR) continue; die("SA stream write error (1)"); }
++    if(written==0 || (size_t) written>towrite) die("SA stream write error (2)");
++    towrite -= written;
++    b += written;
++  }
++}
++
++// per-thread output of one range: BWT chars and SA values, flushed in chunks
++struct Emitter {
++  thread_data *d;
++  range_state *rs;
++  long id;
++  uint8_t *bwt, *sab;    // chunk buffers, Stream_chunk_entries entries each
++  long nb, ns, produced; // entries in the buffers, entries of the range so far
++  long bwt_off;          // BWT chars already written for this range
++  bool skip_first;       // the very first BWT char has no SA value
++  explicit Emitter(thread_data *td) : d(td), rs(NULL), id(0), nb(0), ns(0), produced(0), bwt_off(0), skip_first(false) {
++    bwt = (uint8_t *) malloc(Stream_chunk_entries);
++    sab = (uint8_t *) malloc((size_t) Stream_chunk_entries*SABYTES);
++    if(bwt==NULL || sab==NULL) die("malloc failed (chunk buffers)");
++  }
++  ~Emitter() { free(bwt); free(sab); }
++  void begin(range_state *r, long i) {
++    rs = r; id = i; nb = ns = produced = bwt_off = 0;
++    skip_first = d->SA && r->r.bwt_start==0;
++  }
++  inline void put(uint8_t b, uint64_t sa) {
++    bwt[nb++] = b;
++    if(d->SA) {
++      if(skip_first) skip_first = false;
++      else { memcpy(sab + ns*SABYTES,&sa,SABYTES); ns++; }
++    }
++    produced++;
++    if(nb==Stream_chunk_entries) flush();
++  }
++  void flush() {
++    if(nb>0) {
++      fd_write(d->bwt_fd,bwt,nb,rs->r.bwt_start + bwt_off);
++      bwt_off += nb; nb = 0;
++    }
++    if(ns>0) {
++      size_t bytes = ns*SABYTES;
++      uint8_t *copy = (uint8_t *) malloc(bytes);
++      if(copy==NULL) die("malloc failed (SA chunk)");
++      memcpy(copy,sab,bytes); ns = 0;
++      double t0 = now_s();
++      std::unique_lock<std::mutex> lk(d->m);
++      d->cv_budget.wait(lk,[&]{ return d->used + bytes <= d->budget ||
++                                       (id==d->head && rs->queued < 2*d->chunk_bytes); });
++      d->wait_budget_s += now_s() - t0;
++      d->used += bytes; rs->queued += bytes;
++      if(d->used > d->peak_used) d->peak_used = d->used;
++      rs->chunks.push_back({copy,bytes});
++      lk.unlock();
++      d->cv_writer.notify_all();
++    }
++  }
++  void finish() {
++    flush();
++    assert(produced==rs->r.count);
++    {
++      std::lock_guard<std::mutex> lk(d->m);
++      rs->done = true;
++    }
++    d->cv_writer.notify_all();
++  }
++};
++
++// write to the output all the characters preceding a given suffix
++// doing a merge operation if necessary; with SA also the SA values
++static void emit_chars_same_suffix(vector<uint32_t> &id2merge,  vector<uint8_t> &char2write,
++                                   uint32_t *ilist, uint32_t *istart, Emitter &em,
++                                   long &easy_bwts, long &hard_bwts,
++                                   int_t suffixLen, bool SA, uint8_t *bwsainfo, long n)
+ {
+   size_t numwords = id2merge.size(); // numwords dictionary words contain the same suffix
+   bool samechar=true;
+   for(size_t i=1;(i<numwords)&&samechar;i++)
+-    samechar = (char2write[i-1]==char2write[i]); 
+-  if(samechar) {
+-    for(size_t i=0; i<numwords; i++) {
+-      uint32_t s = id2merge[i];
+-      for(long j=istart[s];j<istart[s+1];j++)
+-        bwt[c++] = char2write[0];
+-      easy_bwts +=  istart[s+1]- istart[s]; 
+-    }
+-  }
+-  else {  // many words, many chars...     
+-    vector<SeqId> heap; // create heap
++    samechar = (char2write[i-1]==char2write[i]);
++  if(SA ? numwords==1 : samechar) {
+     for(size_t i=0; i<numwords; i++) {
+       uint32_t s = id2merge[i];
+-      heap.push_back(SeqId(s,istart[s+1]-istart[s], ilist+istart[s], char2write[i]));
+-    }
+-    std::make_heap(heap.begin(),heap.end());
+-    while(heap.size()>0) {
+-      // output char for the top of the heap
+-      SeqId s = heap.front();
+-      bwt[c++] = s.char2write;
+-      hard_bwts += 1;
+-      // remove top 
+-      pop_heap(heap.begin(),heap.end());
+-      heap.pop_back();
+-      // if remaining positions, reinsert to heap
+-      if(s.next()) {
+-        heap.push_back(s);
+-        push_heap(heap.begin(),heap.end());
++      for(long j=istart[s];j<istart[s+1];j++) {
++        uint64_t sa = SA ? get_myint(bwsainfo,n,ilist[j]) - suffixLen : 0;
++        em.put(char2write[0],sa);
+       }
++      easy_bwts +=  istart[s+1]- istart[s];
+     }
+   }
+-}
+-
+-
+-// write to the bwt all the characters preceding a given suffix
+-// doing a merge operation if necessary
+-static void write_chars_same_suffix_sa(vector<uint32_t> &id2merge,  vector<uint8_t> &char2write, 
+-                                    uint32_t *ilist, uint32_t *istart,
+-                                    uint8_t *local_bwt, uint8_t *local_sa, long &c, long &easy_bwts, long &hard_bwts,
+-                                    int_t suffixLen, uint8_t *bwsainfo, long n)
+-{
+-  size_t numwords = id2merge.size(); // numwords dictionary words contain the same suffix
+-  if(numwords==1) {
+-    uint32_t s = id2merge[0];
+-    int nextbwt = char2write[0];
+-    for(long j=istart[s];j<istart[s+1];j++) {
+-      uint64_t sa = get_myint(bwsainfo,n,ilist[j]) - suffixLen;
+-      memcpy(local_sa + c*SABYTES,&sa,SABYTES);// write SA value to sa buffer
+-      local_bwt[c++] = nextbwt;                // write BWT value to bwt buffer
+-      easy_bwts++;
+-    }
+-  }  
+-  else {  // many words, many chars...     
++  else {  // many words, many chars...
+     vector<SeqId> heap; // create heap
+     for(size_t i=0; i<numwords; i++) {
+       uint32_t s = id2merge[i];
+@@ -272,11 +364,10 @@
+     while(heap.size()>0) {
+       // output char for the top of the heap
+       SeqId s = heap.front();
+-      uint64_t sa = get_myint(bwsainfo,n,*(s.bwtpos)) - suffixLen;
+-      memcpy(local_sa + c*SABYTES,&sa,SABYTES);// write SA value to sa buffer
+-      local_bwt[c++] = s.char2write;          // write BWT value to bwt buffer
++      uint64_t sa = SA ? get_myint(bwsainfo,n,*(s.bwtpos)) - suffixLen : 0;
++      em.put(s.char2write,sa);
+       hard_bwts += 1;
+-      // remove top 
++      // remove top
+       pop_heap(heap.begin(),heap.end());
+       heap.pop_back();
+       // if remaining positions, reinsert to heap
+@@ -288,64 +379,51 @@
+   }
+ }
+ 
+-
+-
+-
+-
+-static void *merge_body(void *v)
++static void merge_worker(thread_data *d)
+ {
+-  thread_data *d = (thread_data *) v;
+-
+-  long i, next, c, full_words=0, easy_bwts=0, hard_bwts=0;
+-  uint8_t *local_bwt = NULL;
+-  uint8_t *local_sa = NULL;
+-  // main loop 
++  long full_words=0, easy_bwts=0, hard_bwts=0;
++  Emitter em(d);
+   while(true) {
+-    // --- get starting position from buffer 
+-    xsem_wait(&d->data_items,__LINE__,__FILE__);
+-    xpthread_mutex_lock(&d->cons_m,__LINE__,__FILE__);
+-    da_range r = d->buffer[d->cindex++ % Buf_size]; 
+-    xpthread_mutex_unlock(&d->cons_m,__LINE__,__FILE__);
+-    xsem_post(&d->free_slots,__LINE__,__FILE__);
+-    // exit if start is illegal
+-    if(r.start<0) break;
+-    // process range [start,end]
+-    local_bwt = (uint8_t *) realloc(local_bwt,r.count);
+-    assert(local_bwt!=NULL);
+-    if(d->SA) { // if we need to compute the sa, alloc space for it
+-      local_sa = (uint8_t *) realloc(local_sa,SABYTES*r.count);
+-      assert(local_sa!=NULL);
+-    }
+-    for(c=0, i = r.start; i<r.end; i=next){
++    // --- get the next range, in dispatch order
++    long id; range_state *rs;
++    {
++      std::unique_lock<std::mutex> lk(d->m);
++      d->cv_todo.wait(lk,[&]{ return !d->todo.empty() || d->producer_done; });
++      if(d->todo.empty()) break;
++      id = d->todo.front(); d->todo.pop_front();
++      rs = d->table[id - d->table_base];
++    }
++    d->cv_prod.notify_one();
++    const da_range r = rs->r;
++    em.begin(rs,id);
++    long i, next;
++    for(i = r.start; i<r.end; i=next){
+       // we are considering d[sa[i]....] belonging to da[i]
+-      next = i+1;  // prepare for next iteration  
+-      // discard if it is a small suffix 
++      next = i+1;  // prepare for next iteration
++      // discard if it is a small suffix
+       if(d->suflen[i]<=d->w) continue;
+       uint32_t seqid = d->da[i]&0x7FFFFFFF;
+       assert(seqid<d->dwords);
+-      // ----- simple case: the suffix is a full word 
++      // ----- simple case: the suffix is a full word
+       if(d->suflen[i]==d->wlen[seqid]) {
+         full_words++;
+         for(long j=d->istart[seqid];j<d->istart[seqid+1];j++) {
+           int nextbwt = d->last[d->ilist[j]]; // compute next bwt char
++          uint64_t sa = 0;
+           if(d->SA) {
+-            uint64_t sa = 0;
+-            if(seqid>0) { // if not the first word in the parse output SA values
++            if(seqid>0) // if not the first word in the parse output SA values
+               sa = get_myint(d->bwsainfo,d->psize,d->ilist[j]) - d->suflen[i];
+-            }
+             else assert(j==1); // the first word in the parse is the 2nd lex smaller
+-            // if seqid==0 we are writing and invalid 0 value, but it will not be copied in the sa file
+-            // this is done to keep the number of items written to bwt_local and sa_local equals  
+-            memcpy(local_sa + c*SABYTES,&sa,SABYTES);
+-          } 
+-          local_bwt[c++] = nextbwt;
++            // its entry (the very first of the stream) has no SA value: Emitter drops it
++          }
++          em.put(nextbwt,sa);
+           easy_bwts++;
+         }
+-        continue; // proceed with next i 
++        continue; // proceed with next i
+       }
+       // ----- hard case: there can be a group of equal suffixes starting at i
+-      // save seqid and the corresponding char 
+-      vector<uint32_t> id2merge(1,seqid); 
++      // save seqid and the corresponding char
++      vector<uint32_t> id2merge(1,seqid);
+       vector<uint8_t> char2write(1,d->dict[d->eos[seqid]-d->suflen[i]-1]);
+       while(next<r.end && d->suflen[next]==d->suflen[i]) {
+         seqid = d->da[next]&0x7FFFFFFF;
+@@ -357,65 +435,93 @@
+         }
+         else break;
+       }
+-      if(d->SA)
+-        write_chars_same_suffix_sa(id2merge, char2write, d->ilist,d->istart,local_bwt,local_sa,c,easy_bwts,hard_bwts,
+-        d->suflen[i],d->bwsainfo,d->psize);
+-      else
+-        write_chars_same_suffix(id2merge, char2write, d->ilist,d->istart,local_bwt,c,easy_bwts,hard_bwts);
++      emit_chars_same_suffix(id2merge, char2write, d->ilist,d->istart,em,easy_bwts,hard_bwts,
++                             d->suflen[i],d->SA,d->bwsainfo,d->psize);
+     }
+     assert(i==r.end);
+-    assert(c==r.count);
+-    // write local_bwt to file d->bwt_fd starting from position r.bwt_start
+-    fd_write(d->bwt_fd,local_bwt,r.count,r.bwt_start);
+-    // if requested write SA values to file d->sa_fd
+-    if(d->SA) {
+-      if(r.bwt_start==0) // skip first entry
+-        fd_write(d->sa_fd,local_sa+SABYTES,(r.count-1)*SABYTES,r.bwt_start*SABYTES);
+-      else   // write one entry left 
+-        fd_write(d->sa_fd,local_sa,r.count*SABYTES,(r.bwt_start-1)*SABYTES);
+-    }
++    em.finish();
+   }
+-  if(local_bwt!=NULL) free(local_bwt);
+-  if(local_sa!=NULL) free(local_sa);
+-  xpthread_mutex_lock(&d->cons_m,__LINE__,__FILE__);
+-  d->easy_bwts += easy_bwts;  
+-  d->hard_bwts += hard_bwts;  
+-  d->full_words += full_words;  
+-  xpthread_mutex_unlock(&d->cons_m,__LINE__,__FILE__);
+-  return NULL;
++  std::lock_guard<std::mutex> lk(d->m);
++  d->easy_bwts += easy_bwts;
++  d->hard_bwts += hard_bwts;
++  d->full_words += full_words;
+ }
+ 
+-// write towrite bytes from buffer b in file descriptor fd starting from offset start 
+-static void fd_write(int fd, uint8_t *b,long towrite,long start)
++// the single writer: emits the SA ranges strictly in order
++static void sa_writer(thread_data *d)
+ {
+-  long c = 0; 
+-  while(towrite>0) {
+-    long written = pwrite(fd,b+c,towrite,start);
+-    if(written<0) die("pwrite error (1)");
+-    if(written>towrite) die("pwrite error (2)");
+-    towrite -= written;
+-    start += written;
+-    c += written;
+-  }  
++  int fd = -1;
++  if(d->SA) {
++    fd = fd_open_aux_file(d->basename,"sa",O_CREAT|O_WRONLY|O_TRUNC); // blocks until a FIFO has a reader
++    if(fd<0) die("Error opening output SA file");
++    struct stat st;
++    if(fstat(fd,&st)==0 && S_ISFIFO(st.st_mode))
++      (void) fcntl(fd,F_SETPIPE_SZ,1<<20);   // best effort
++  }
++  std::unique_lock<std::mutex> lk(d->m);
++  while(true) {
++    double t0 = now_s();
++    d->cv_writer.wait(lk,[&]{ return !d->table.empty() || d->producer_done; });
++    d->writer_wait_s += now_s() - t0;
++    if(d->table.empty()) break;           // producer_done and everything written
++    range_state *rs = d->table.front();
++    d->head = d->table_base;
++    d->cv_budget.notify_all();
++    while(true) {
++      t0 = now_s();
++      d->cv_writer.wait(lk,[&]{ return !rs->chunks.empty() || rs->done; });
++      d->writer_wait_s += now_s() - t0;
++      if(rs->chunks.empty()) break;       // range complete
++      sa_chunk c = rs->chunks.front(); rs->chunks.pop_front();
++      lk.unlock();
++      t0 = now_s();
++      fd_write_stream(fd,c.data,c.bytes);
++      double dt = now_s() - t0;
++      free(c.data);
++      lk.lock();
++      d->writer_write_s += dt; d->bytes_out += c.bytes;
++      d->used -= c.bytes; rs->queued -= c.bytes;
++      d->cv_budget.notify_all();
++    }
++    d->table.pop_front(); d->table_base++;
++    delete rs;
++  }
++  lk.unlock();
++  if(fd>=0 && close(fd)!=0) die("SA stream close error");
++}
++
++// producer side: hand a range to the workers (blocks if they are far behind)
++static void submit_range(thread_data &td, const da_range &r, size_t todo_max)
++{
++  range_state *rs = new range_state;
++  rs->r = r; rs->queued = 0; rs->done = false;
++  {
++    std::unique_lock<std::mutex> lk(td.m);
++    td.cv_prod.wait(lk,[&]{ return td.todo.size() < todo_max; });
++    td.table.push_back(rs);
++    td.todo.push_back(td.next_id++);
++  }
++  td.cv_todo.notify_one();
++  td.cv_writer.notify_all();
+ }
+ 
+ // bwt construction from dictionary and parse using multiple threads
+-void bwt_multi(Args &arg, uint8_t *d, long dsize, // dictionary and its size  
+-         uint32_t *ilist, uint8_t *last, long psize, // ilist, last and their size 
++void bwt_multi(Args &arg, uint8_t *d, long dsize, // dictionary and its size
++         uint32_t *ilist, uint8_t *last, long psize, // ilist, last and their size
+          uint32_t *istart, long dwords) // starting point in ilist for each word and # words
+-{  
++{
+   (void) psize; // used only in assertions
+-  assert(arg.th>0); 
++  assert(arg.th>0);
+   if(arg.sampledSA) {
+     cout << "Mutithread version doesn't support computation of sampled SA values yet\n";
+     exit(1);
+   }
+   // possibly read bwsa info file
+   uint8_t *bwsainfo = load_bwsa_info(arg,psize);
+-  
+-  // compute sa and bwt of d and do some checking on them 
+-  uint_t *sa; int_t *lcp; 
+-  compute_dict_bwt_lcp(d,dsize,dwords,arg.w,&sa,&lcp);
++
++  // compute sa and bwt of d and do some checking on them
++  uint_t *sa; int_t *lcp;
++  compute_dict_bwt_lcp(arg,d,dsize,dwords,&sa,&lcp);
+   // set d[0] ==0 as this is the EOF char in the final BWT
+   assert(d[0]==Dollar);
+   d[0]=0;
+@@ -435,44 +541,49 @@
+   td.da = da; td.eos = eos; td.w = arg.w;
+   td.last = last; td.ilist = ilist; td.istart=istart;
+   td.full_words = td.easy_bwts = td.hard_bwts = 0;
+-  td.cindex=0;
+-  pc_init(&td.free_slots,&td.data_items,&td.cons_m); 
+   td.bwt_fd = get_bwt_fd(arg.basename); // file descriptor of output bwt file
+-  td.SA = arg.SA;                       // fields possibly used for SA computation 
+-  td.sa_fd = arg.SA ? get_sa_fd(arg.basename) : -1; // sa_fd<0 means SA not requested  
++  td.SA = arg.SA;                       // fields possibly used for SA computation
++  td.basename = arg.basename;           // the writer opens the SA stream
+   td.bwsainfo = bwsainfo;
+   td.psize = psize;
+-  // start consumer threads
+-  pthread_t t[arg.th];
++  td.table_base = 0; td.next_id = 0; td.producer_done = false; td.head = 0;
++  td.used = td.peak_used = 0; td.bytes_out = 0;
++  td.chunk_bytes = (size_t) Stream_chunk_entries*SABYTES;
++  td.budget = (size_t) arg.sa_buf_mb << 20;
++  if(td.budget < 2*td.chunk_bytes) td.budget = 2*td.chunk_bytes;
++  td.wait_budget_s = td.writer_wait_s = td.writer_write_s = 0;
++  const size_t todo_max = (size_t) Stream_todo_per_thread*arg.th;
++  // start the writer and the worker threads
++  std::thread writer(sa_writer,&td);
++  std::vector<std::thread> workers;
+   for(int i=0;i<arg.th;i++)
+-    xpthread_create(&t[i],NULL,merge_body,&td,__LINE__,__FILE__);
++    workers.emplace_back(merge_worker,&td);
+ 
+   // main loop: consider each entry in the DA[] of dict
+-  //uint8_t *bwt = get_mmaped_bwt(name);
+   time_t  start = time(NULL);
+-  long written=0, entries=0;  
++  double t_start = now_s();
++  long written=0, entries=0, nranges=0, max_range=0;
+   long next, full_words=0;
+-  int pindex=0; da_range r = {0,0,0,0};
++  da_range r = {0,0,0,0};
+   for(long i=0; i< dasize; i=next ) {
+-    // ---- if a batch is ready write it to the prod/cons buffer
++    // ---- if a batch is ready hand it to the workers
+     if(entries >= Min_bwt_range) {
+       r.start = r.end; r.end = i;
+       r.bwt_start = written; r.count = entries;
+-      xsem_wait(&td.free_slots,__LINE__,__FILE__);
+-      td.buffer[pindex++ % Buf_size] = r;
+-      xsem_post(&td.data_items,__LINE__,__FILE__);
++      submit_range(td,r,todo_max); nranges++;
++      if(entries>max_range) max_range = entries;
+       written += entries; entries=0;
+     }
+-    next = i+1;  // prepare for next iteration  
+-    // discard if it is a small suffix 
++    next = i+1;  // prepare for next iteration
++    // discard if it is a small suffix
+     if(suflen[i]<=arg.w) continue;
+     uint32_t seqid = da[i]&0x7FFFFFFF;
+     assert(seqid<dwords);
+     entries += istart[seqid+1]-istart[seqid];
+-    // ----- simple case: the suffix is a full word 
++    // ----- simple case: the suffix is a full word
+     if(suflen[i]==wlen[seqid]) {
+       full_words++;
+-      continue; // proceed with next i 
++      continue; // proceed with next i
+     }
+     // ----- hard case: there can be a group of equal suffixes starting at i
+     while(next<dasize && suflen[next]==suflen[i]) {
+@@ -485,36 +596,35 @@
+       else break;
+     }
+   }
+-  // write last range to pc buffer
++  // last range
+   r.start = r.end; r.end = dasize;
+   r.bwt_start = written; r.count = entries;
+-  xsem_wait(&td.free_slots,__LINE__,__FILE__);
+-  td.buffer[pindex++ % Buf_size] = r;
+-  xsem_post(&td.data_items,__LINE__,__FILE__);
+-  // terminate and join threads 
+-  r.start = -1; 
+-  for(int i=0;i<arg.th;i++) {
+-    xsem_wait(&td.free_slots,__LINE__,__FILE__);
+-    td.buffer[pindex++ % Buf_size] = r;
+-    xsem_post(&td.data_items,__LINE__,__FILE__);
+-  }
+-  for(int i=0;i<arg.th;i++)
+-    xpthread_join(t[i],NULL,__LINE__,__FILE__);
++  submit_range(td,r,todo_max); nranges++;
++  if(entries>max_range) max_range = entries;
++  double t_produced = now_s();
++  {
++    std::lock_guard<std::mutex> lk(td.m);
++    td.producer_done = true;
++  }
++  td.cv_todo.notify_all();
++  td.cv_writer.notify_all();
++  for(auto &t : workers) t.join();
++  writer.join();
+ 
+-  assert(td.full_words==dwords);  
++  assert(td.full_words==dwords);
++  assert(td.table.empty() && td.used==0);
+   cout << "Full words: " << td.full_words << endl;
+   cout << "Easy bwt chars: " << td.easy_bwts << endl;
+   cout << "Hard bwt chars: " << td.hard_bwts << endl;
+-  cout << "Generating the final BWT took " << difftime(time(NULL),start) << " wall clock seconds (" << arg.th <<" threads, range "<< Min_bwt_range<<")\n";    
+-  pc_destroy(&td.free_slots,&td.data_items,&td.cons_m);
++  cout << "Generating the final BWT took " << difftime(time(NULL),start) << " wall clock seconds (" << arg.th <<" threads, range "<< Min_bwt_range<<")\n";
++  cout << "Ordered SA stream: " << td.bytes_out << " bytes in " << nranges << " ranges (largest " << max_range << " entries), buffer budget "
++       << (td.budget>>20) << " MiB, peak buffered " << (td.peak_used>>10) << " KiB; producer " << (t_produced-t_start)
++       << " s, total " << (now_s()-t_start) << " s; writer busy " << td.writer_write_s << " s, idle " << td.writer_wait_s
++       << " s; workers blocked on budget " << td.wait_budget_s << " s (summed)\n";
+   close(td.bwt_fd); // close bwt file
+   delete[] lcp;
+   delete[] sa;
+-  if(arg.SA) {
+-    assert(td.sa_fd>=0);
+-    close(td.sa_fd); // close sa file
+-    free(bwsainfo);  // free sa info
+-  }
++  if(arg.SA) free(bwsainfo);  // free sa info
+ }
+ 
+ // compute size of the bwt adding 1 to the input size
+@@ -549,12 +659,6 @@
+   return bwt_fd;
+ }
+ 
+-static int get_sa_fd(char *name)
+-{
+-  int sa_fd = fd_open_aux_file(name,"sa",O_CREAT|O_WRONLY|O_TRUNC);
+-  if(sa_fd<0) die("Error opening output SA file");
+-  return sa_fd;
+-}
+ 
+ 
+ // initialize/destroy semaphores and mutex for producer/consumer 

@@ -21,7 +21,14 @@ For each target suffix, the nearest reference suffix on each side supplies
 candidates. Longest phrase matches are extended by exact DNA comparisons.
 Target blocks are disjoint, cannot cross contigs and can copy either reference
 orientation. Adjacent compatible copies coalesce. A phrase-level candidate
-search does not guarantee the globally optimal DNA-relative parse. Whole-contig
+search alone misses exact runs that lie between nearby differences and hold no
+complete reference phrase, so each target gap between consecutive copies is then
+re-anchored at base level: 16-mer seeds on the flanking copies' source segments
+within 1024 bp of their diagonals, extended by exact byte comparison, yield every
+maximal exact run of at least 40 bp (up to three rounds, since new copies give new
+diagonals). Gaps are independent, so the result does not depend on the thread
+count. The copy format is unchanged. The combined search does not guarantee the
+globally optimal DNA-relative parse. Whole-contig
 copies are also checked directly, so identical low-complexity contigs can share
 storage even when PFP supplies no internal anchors. CRC preselects candidates;
 complete byte comparisons establish identity.
@@ -37,7 +44,8 @@ native or PFP sorting backend. Native filtering happens before bucket output.
 ## Physical files
 
 All integers are little endian; unsigned varints use seven payload bits per
-byte, with overflow and truncation rejection. Compression is zlib level 1.
+byte, with overflow and truncation rejection. Blocks are zlib-format streams
+written by libdeflate at level 1 (any zlib reader decodes them).
 
 * `reference.sgr` / `residual.sgr`: `SXGTEMP4`, container version 4, reuse the
   existing 128-byte archive header, 4096-row blocks, adaptive position codecs
@@ -119,6 +127,23 @@ Self comparison excludes the query occurrence when choosing the longest
 prefix: repeated exact keys use length 40; singleton keys use the longest LCP
 to either neighboring key. The frequency range still includes the query itself,
 and emission excludes that occurrence. Masks apply after this count.
+
+## Direct joint output
+
+The two stream producers (`gixshare build-stream` for the native backend,
+`pfp-emit` for PFP) write the joint bundle themselves: `reference.sgr` and
+`residual.sgr` are produced block by block in the template layout, and a shared
+sink fed with every row in global key order computes `joint.order` (origin,
+weight), its directory, the weighted per-prefix counts of the target view and the
+`ac==reference marks`, `bt==target marks` accounting checks, then writes both
+views, `joint.copies`, the metas and `joint.names`. Reference rows of an equal
+key precede target rows, each sample in its own row order; PFP delivers equal
+keys in suffix-array order, so its sink holds target rows back until the key
+ends. No per-sample v3 archive is written and no second pass decodes one.
+`gixshare joint-pack` is retained as the oracle: the builder variable
+`FASTGA_SHARED_JOINT_TWO_STEP=1` selects the two-step path, and
+`tests/test_joint_fused.py` reruns both on copies of the same staged inputs and
+requires identical bytes (every thread count, both backends).
 
 ## Validation and accounting
 

@@ -6,6 +6,11 @@
 #include <random>
 int main(int argc,char**argv){try{
     if(argc!=2)sg::fail("usage: test-joint-weights TEMPORARY_FILE");
+    // SIMULATED bytes: the pool-split file CRC (files >=64 MiB) equals one zlib pass.
+    {sg::encode_threads=8;std::mt19937_64 fill(30);std::vector<unsigned char> data(200u<<20);for(auto&v:data)v=fill();
+     for(uint64_t size:{uint64_t(1),uint64_t(64u<<20)+5,uint64_t(200u<<20)})
+         if(sg::file_crc(data.data(),size)!=crc32(0,data.data(),size))sg::fail("SIMULATED split file CRC differs at "+std::to_string(size));
+     sg::encode_threads=1;}
     sg::Bytes raw;for(auto pair:{std::pair<uint64_t,uint64_t>{0,(1ull<<32)+9},{1,1},{0,0}}){sg::varint(raw,pair.first);sg::varint(raw,pair.second);}
     {sg::Writer w(argv[1],sg::ORDER_MAGIC,10);sg::joint_order_block(w,raw,3);w.finish();}
     sg::Archive a(argv[1],sg::ORDER_MAGIC);auto encoded=a.decode(0);sg::Bytes expected{2,3,1,0,0x89,0x80,0x80,0x80,0x10};if(encoded!=expected)sg::fail("independent 64-bit joint weight wire oracle differs");auto rows=sg::joint_decode_weights(encoded,3,1);if(rows.size()!=3||rows[0].origin||rows[0].weight!=(1ull<<32)+9||rows[1].origin!=1||rows[1].weight!=1||rows[2].weight)sg::fail("64-bit joint weight decode differs");

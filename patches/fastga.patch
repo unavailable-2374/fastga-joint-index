@@ -826,7 +826,7 @@ index d70381d..623629b 100644
    }
      
 +#ifdef SXGC_PFP_MARKS
-+  sxgc_pfp_begin(gdb,MASK_ANO,MASK,PostBytes,ContBytes,Perm);
++  sxgc_pfp_begin(gdb,MASK_ANO,MASK,PostBytes,ContBytes,Perm,NTHREADS);
 +#endif
 +#ifdef SXGC_DIRECT_STREAM
 +  sxgc_joint_filter_begin();
