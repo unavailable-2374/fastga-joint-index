@@ -155,6 +155,38 @@ Use reference,query order in `--samples`. The descriptor must have the GDB's
 stem and directory. Creating a new view needs the original sample GDBs; reading
 an existing view needs only that view's GDB/BPS and the physical index bundle.
 
+## Current version compared with original FastGA
+
+Real measurements on the complete *Macaca nemestrina* haplotype pair
+(PR00030, hap1 as reference, hap2 as query), `-T24 -pafx`, one shared Linux host
+with 256 logical CPUs. Original FastGA is the unmodified upstream build
+(`FastGA-baseline`); the current version is `FastGA-shared` with the
+minimizer-anchor copy finder.
+
+| Measure | Original FastGA | FastGA-shared | Difference |
+|---|---:|---:|---:|
+| PAF output | 540,544 lines, 14,770,377,539 B | byte-identical (`cmp`), both runs | none |
+| Index files, GDB sequence excluded | 64,450,238,138 B (`.gix` + `.ktab.*`, both genomes) | 13,034,351,452 B (all joint index files) | 20.2% of original, 4.94× smaller |
+| End-to-end wall time (index + alignment) | 2,149 s | 2,286 s; 2,332 s | +6.3%; +8.5% |
+| End-to-end CPU (user + system) | 9,029 core-s (420% CPU) | 18,186; 19,165 core-s | 2.01×; 2.12× |
+| End-to-end peak RSS | 19,210,152 KiB (18.32 GiB) | 19,739,836; 19,702,008 KiB (18.83; 18.79 GiB) | +2.8%; +2.6% |
+
+The GDB sequence files (`.bps`, 1,543,856,064 B for both genomes) are identical
+in both setups and are excluded from the index sizes.
+
+For the current version alone:
+- Index construction takes 584 s.
+- The copy finder takes 94 s and the merge 445 s.
+- Peak RSS of a standalone index build is 15,515,908 KiB (14.80 GiB), so the end-to-end peak occurs during alignment.
+- Exact copies cover 97.60% of query bases, leaving 395.1 million residual index rows.
+
+Caveats:
+- Every row is a single run, and the host was shared. Load averages were 85–200 during the original run and 65–161 during the two current runs.
+- The wall-time gap is therefore approximate.
+- The original run used only 420% CPU, so much of the extra CPU in the current version ran on otherwise idle cores.
+- Original FastGA index construction was not timed separately from alignment.
+- A human CHM13 versus HG002 comparison with separate index and alignment timing is in progress and is not reported here.
+
 ## What has actually been measured
 
 The following are real observations from the original integration, before this
