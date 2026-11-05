@@ -9,29 +9,35 @@ biologically. A, B and a merged GDB use views of the same physical index.
 ## Construction
 
 `GIXmake-shared --storage joint --reference A` requires exactly two named inputs.
-Native selected-position bitmaps are collected for both strands. The pinned
-Big-BWT parser (`fa9a1663af10661d92a47d0e1f07218577bfd8bd`, window 10,
-modulus 100) supplies phrase IDs and 5-byte ending positions. These endpoints
-exclude the synthetic leading dollar. Phrase overlaps are counted once;
-phrases crossing a contig or collection boundary do not become anchors.
+Native selected-position bitmaps are collected for both strands, together with
+the oriented marked texts (each contig forward and reverse-complemented).
 
-The constructor builds a suffix array and LCP array over 64-bit phrase IDs,
-using libsais 2.12.1, revision `c284ba843dd16c159acb976f17bc19382793ea75`.
-For each target suffix, the nearest reference suffix on each side supplies
-candidates. Longest phrase matches are extended by exact DNA comparisons.
-Target blocks are disjoint, cannot cross contigs and can copy either reference
-orientation. Adjacent compatible copies coalesce. A phrase-level candidate
-search alone misses exact runs that lie between nearby differences and hold no
-complete reference phrase, so each target gap between consecutive copies is then
-re-anchored at base level: 16-mer seeds on the flanking copies' source segments
-within 1024 bp of their diagonals, extended by exact byte comparison, yield every
-maximal exact run of at least 40 bp (up to three rounds, since new copies give new
-diagonals). Gaps are independent, so the result does not depend on the thread
-count. The copy format is unchanged. The combined search does not guarantee the
-globally optimal DNA-relative parse. Whole-contig
-copies are also checked directly, so identical low-complexity contigs can share
-storage even when PFP supplies no internal anchors. CRC preselects candidates;
-complete byte comparisons establish identity.
+Copies come from a minimizer-anchor finder (`joint-copy`) that reads only these
+texts; it needs no PFP parse and no suffix array. The reference text, both
+strands, is indexed by its (k=21, w=20) minimizers: every window of w
+consecutive k-mers contributes its smallest-hash k-mer (leftmost on ties), so any
+exact match of at least k+w-1 = 40 bp shares a minimizer with the reference.
+Minimizers of every target contig (forward only) are looked up; each reference
+occurrence of a seed with at most 1000 occurrences is extended to the maximal
+exact run on both sides (bounded by the two contigs) and runs of at least 40 bp
+become candidates. Seeds with more occurrences are skipped. Target windows of
+1 Mbp are independent and merged in order. A left-to-right selection makes the
+target blocks disjoint: it takes the candidate reaching furthest from the cursor,
+trims overlaps, charges 78 bp for leaving the previous copy's diagonal (about two
+block boundaries) and lets a run on that diagonal start up to 64 bp after the
+cursor; ties go to the lowest source position. Blocks cannot cross contigs and can copy
+either reference orientation. Adjacent compatible copies coalesce. Each target
+gap between consecutive copies is then re-anchored: 16-mer seeds on the flanking
+copies' source segments within 1024 bp of their diagonals, extended by exact byte
+comparison, yield every maximal exact run of at least 40 bp (up to three rounds,
+since new copies give new diagonals); this recovers runs in repeats whose seeds
+exceeded the occurrence cap. All steps are independent per window or gap and use
+fixed-size units, so the output does not depend on the thread count. The copy
+format is unchanged. The search does not guarantee the globally optimal
+DNA-relative parse. Whole-contig copies are also checked directly, so identical
+low-complexity contigs can share storage. CRC preselects candidates; complete byte
+comparisons establish identity. `build.json` records the finder's parameters
+(`k`, `w`, `max_occurrences`) and counters under `joint_copies`.
 
 For each complete copied 40-mer, the reference and target native selection
 bits must agree, including reversed copies. This is checked for every bit using
@@ -39,7 +45,7 @@ bounded 64-bit bitmap windows. A disagreement aborts construction. Inherited
 bits are removed from the residual bitmap. Boundary and unshared seeds remain
 literal; inherited plus literal occurrences must equal the original target
 count. Only reference and residual streams are sorted, using the selected
-native or PFP sorting backend. Native filtering happens before bucket output.
+native or PFP sorting backend (the PFP backend parses the same text for its own sorting). Native filtering happens before bucket output.
 
 ## Physical files
 

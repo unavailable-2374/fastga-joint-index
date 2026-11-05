@@ -6,10 +6,12 @@ alignment sensitivity are preserved. The implementation currently requires
 two named inputs, an explicit reference and k=40.
 
 1. Construct GDB sequence storage and collect native selected-position bitmaps
-   for both strands. PFP parses the contig-delimited sequence collection.
-2. Build a 64-bit suffix/LCP index over phrase identifiers using pinned libsais.
-   Locate candidate exact reference matches, extend them with DNA comparisons,
-   and coalesce compatible copies without crossing contig boundaries.
+   for both strands, with the oriented marked texts.
+2. Index the reference's minimizers (both strands). Look up the target's
+   minimizers, extend each hit to the maximal exact run with DNA comparisons,
+   select disjoint blocks, re-anchor the gaps between them and coalesce
+   compatible copies without crossing contig boundaries. No suffix array and no
+   PFP parse are involved.
 3. Verify all complete copied 40-mers' native selection bits. Inherited target
    positions are removed from the residual bitmap. Boundary and unmatched
    occurrences remain literal. Inherited plus residual counts must exactly
@@ -21,8 +23,8 @@ two named inputs, an explicit reference and k=40.
    groups preserve native frequency counts before masking. Locate positions
    for accepted groups lazily, then pass native-shaped records to FastGA.
 
-PFP performs preliminary **exact matching for storage**. It does not compute the
-final genome alignment. Chaining and local alignment remain FastGA's work.
+The anchor finder performs preliminary **exact matching for storage**. It does not
+compute the final genome alignment. PFP is used only by the optional sorting backend. Chaining and local alignment remain FastGA's work.
 
 Sharing only a key dictionary still stores every sample's occurrence list.
 Relative occurrence copies remove that remaining duplication while exposing all

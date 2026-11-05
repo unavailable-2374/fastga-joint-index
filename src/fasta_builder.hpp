@@ -17,13 +17,13 @@ inline Json make_configuration(const fs::path &binary, const fs::path &driver, J
     if (settings.window<4 || settings.modulus<10) throw std::runtime_error("PFP window must be >=4 and modulus >=10");
     if (settings.storage!="legacy" && settings.storage!="positions" && settings.storage!="source" && settings.storage!="joint")
         throw std::runtime_error("storage must be legacy, positions, source or joint");
-    bool joint=settings.storage=="joint",pfp=joint || settings.backend=="pfp";
+    bool joint=settings.storage=="joint",pfp=settings.backend=="pfp"; // joint copies come from the anchor finder; only the PFP backend sorts with Big-BWT
     if (joint && samples.size()!=2) throw std::runtime_error("joint storage needs exactly two samples");
-    if (joint && (settings.window!=10 || settings.modulus!=100)) throw std::runtime_error("joint v4 requires --pfp-window 10 --pfp-modulus 100");
+    if (joint && pfp && (settings.window!=10 || settings.modulus!=100)) throw std::runtime_error("joint v4 requires --pfp-window 10 --pfp-modulus 100 with the pfp backend");
     std::vector<std::string> programs={"FAtoGDB"};
     if (settings.backend=="native" || joint) programs.insert(programs.end(),{"GIXmake-direct","gixshare"});
     if (pfp) programs.insert(programs.end(),{"GIXmake-marks","pfp-emit"});
-    if (joint) programs.push_back("joint-copy");
+    if (joint) programs.insert(programs.end(),{"GIXmake-marks","joint-copy"});
     Json hashes=Json::object();
     auto own=fs::canonical(driver);
     hashes[own.parent_path()==binary?own.filename().string():own.string()]=sha256(own);
@@ -243,14 +243,19 @@ class FastaBuilder {
         close_all();
         if (close(out)<0) fail_errno("collection text write failed");
     }
-    fs::path parse_collection(const std::vector<fs::path> &prefixes, bool remove_marked_text) {
+    // Oriented marked texts of all inputs, concatenated in input order (A forward/reverse, then B).
+    fs::path collect_text(const std::vector<fs::path> &prefixes, bool remove_marked_text) {
         auto text=work_/"collection.text";
         std::vector<fs::path> sources;
         for (const auto &prefix:prefixes) sources.emplace_back(prefix.string()+".text");
         concatenate(sources,text);
         if (remove_marked_text) for (const auto &source:sources) fs::remove(source);
         uint64_t size=fs::file_size(text); report_["pfp_text_bytes"]=size;
-        if (!size || size>=(uint64_t(1)<<40)) throw std::runtime_error("PFP collection exceeds the 5-byte coordinate limit");
+        if (!size || size>=(uint64_t(1)<<40)) throw std::runtime_error("collection text exceeds the 5-byte coordinate limit");
+        return text;
+    }
+    fs::path parse_collection(const std::vector<fs::path> &prefixes, bool remove_marked_text) {
+        auto text=collect_text(prefixes,remove_marked_text);
         // pscan emits the same dictionary, occurrence, parse, last and sai files as serial newscan for any thread count.
         run("pfp-parse",{(pfp_tools()/"pscan").string(),"-w"+std::to_string(window()),"-p"+std::to_string(modulus()),"-s",
                          "-t"+std::to_string(threads_),text.string()});
@@ -351,17 +356,25 @@ class FastaBuilder {
         else wait(ids);
     }
     void joint() {
-        auto manifest=verify_pfp();
+        const bool pfp=backend()=="pfp";
+        Json manifest;
         const auto &samples=config_.at("inputs");
-        report_["pfp_used"]=true; report_["pfp_toolchain"]=manifest;
-        report_["pfp_parameters"]={{"window",10},{"modulus",100}};
+        if (pfp) {
+            manifest=verify_pfp();
+            report_["pfp_used"]=true; report_["pfp_toolchain"]=manifest;
+            report_["pfp_parameters"]={{"window",10},{"modulus",100}};
+        }
         report_["reference"]=samples[0].at("sample");
         auto prefixes=mark_samples();
-        auto text=parse_collection(prefixes,false);
+        // Copies come from the minimizer-anchor finder, which reads only the oriented texts and marks. Only the
+        // PFP sorting backend also needs the PFP parse of the same text. FASTGA_SHARED_ANCHOR_MAX_OCCURRENCES
+        // overrides the occurrence cap (measurements only); the cap and minimizer parameters are recorded in joint_copies.
+        auto text=pfp?parse_collection(prefixes,false):collect_text(prefixes,false);
         auto copies=work_/"copies", keep=work_/"target.keep";
         allot("joint-copy",{{"joint-copy",threads_}});
-        run("joint-copy",{(binary_/"joint-copy").string(),text.string(),text.string()+".dict",text.string()+".parse",text.string()+".sai",
-                          prefixes[0].string(),prefixes[1].string(),copies.string(),keep.string(),std::to_string(threads_)},logs_/"joint-copy.json");
+        Command finder={(binary_/"joint-copy").string(),text.string(),prefixes[0].string(),prefixes[1].string(),copies.string(),keep.string(),std::to_string(threads_)};
+        if (const char *cap=std::getenv("FASTGA_SHARED_ANCHOR_MAX_OCCURRENCES")) { finder.push_back("--max-occurrences"); finder.push_back(cap); }
+        run("joint-copy",finder,logs_/"joint-copy.json");
         report_["joint_copies"]=read_json(logs_/"joint-copy.json");
         auto original=work_/"target-original.meta";
         fs::copy_file(prefixes[1].string()+".meta",original);
@@ -444,7 +457,7 @@ class FastaBuilder {
             }
         }
         write_text(stage_/"READY","SXGC joint GIX 4\n");
-        if (verify_pfp()!=manifest) throw std::runtime_error("PFP toolchain manifest changed during construction");
+        if (pfp && verify_pfp()!=manifest) throw std::runtime_error("PFP toolchain manifest changed during construction");
     }
     // FASTGA_SHARED_RANGES_ORACLE=DIR (tests only, native backend, non-joint storages): reruns the stream
     // consumer on a copy of the staged inputs for each FASTGA_SHARED_JOINT_REPLAY_RANGES entry (0 is the

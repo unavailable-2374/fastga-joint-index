@@ -20,7 +20,7 @@ set(OPENMP_DEFAULT OFF)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(OPENMP_DEFAULT ON)
 endif()
-option(SJ_ENABLE_OPENMP "Use OpenMP for the libsais token suffix-array backend" ${OPENMP_DEFAULT})
+option(SJ_ENABLE_OPENMP "Use OpenMP for the libsais suffix-array sorters of the PFP tools" ${OPENMP_DEFAULT})
 option(SJ_SANITIZE_ADAPTER "Instrument native frontends, adapter/driver, provenance writer and codec test with ASAN/UBSAN" OFF)
 if(SJ_ENABLE_OPENMP)
   find_package(OpenMP REQUIRED COMPONENTS C CXX)
@@ -102,15 +102,13 @@ endforeach()
 add_library(joint_sais OBJECT "${PROJECT_SOURCE_DIR}/vendor/libsais/src/libsais.c"
   "${PROJECT_SOURCE_DIR}/vendor/libsais/src/libsais64.c")
 target_include_directories(joint_sais PRIVATE "${PROJECT_SOURCE_DIR}/vendor/libsais/include")
-add_executable(joint-copy "${SRC}/joint_copy.cpp" $<TARGET_OBJECTS:joint_sais>)
-target_include_directories(joint-copy PRIVATE "${PROJECT_SOURCE_DIR}/vendor/libsais/include")
-sj_program(joint-copy)
 if(SJ_ENABLE_OPENMP)
   target_compile_definitions(joint_sais PRIVATE LIBSAIS_OPENMP)
   target_link_libraries(joint_sais PRIVATE OpenMP::OpenMP_C)
-  target_compile_definitions(joint-copy PRIVATE LIBSAIS_OPENMP)
-  target_link_libraries(joint-copy PRIVATE OpenMP::OpenMP_CXX)
 endif()
+# Anchor-based copy finder: no suffix array. libsais now serves only the Big-BWT parse/dictionary sorters (pfp-tools).
+add_executable(joint-copy "${SRC}/joint_copy.cpp")
+sj_program(joint-copy)
 
 # The PFP tools remain separate processes, as in the validated implementation.
 add_library(bwt_utils OBJECT "${BWT}/utils.c")
@@ -194,6 +192,8 @@ if(SJ_PYTHON_TESTS)
   add_test(NAME joint-fixtures COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_joint.py"
     --bin "${CMAKE_BINARY_DIR}" --pfp-tools "${CMAKE_BINARY_DIR}/pfp-tools" --threads 4
     --report "${CMAKE_BINARY_DIR}/test-results/joint.json")
+  add_test(NAME joint-copy-finder COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_joint_copy.py"
+    --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/joint-copy.json")
   add_test(NAME fasta-entry-point COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_fasta_cli.py"
     --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/fasta-cli.json")
   set_tests_properties(fasta-entry-point PROPERTIES

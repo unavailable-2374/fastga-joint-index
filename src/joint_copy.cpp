@@ -1,174 +1,185 @@
-// PFP-token relative parsing. All copied DNA and inherited marks are checked exactly.
-#include "joint_copies.hpp"
-#include "libsais64.h"
+// Anchor-based joint copy finder (no PFP parse, no token suffix array).
+// Index: minimizers (k=21, w=20 by default) of the reference text, both strands. Query: minimizers of every target
+// forward contig. Every hit is extended to the maximal exact run on its segment pair (>=40 bp kept); a deterministic
+// left-to-right furthest-reach selection makes the target blocks disjoint; the existing gap re-anchoring and exact
+// sampler/keep verification (joint_stages.hpp) finish the job. Output files equal joint-copy's.
+#include "joint_stages.hpp"
 #include <iostream>
 #include <fstream>
-#include <map>
-#include <thread>
-#include <atomic>
-struct Segment {uint64_t begin,end;uint32_t c;bool reverse,reference;};
+#include <chrono>
+#include <sys/resource.h>
+using namespace js;
+namespace {
+constexpr unsigned BB=20,TAGB=24;constexpr uint64_t POSMASK=(1ull<<40)-1;
+inline uint64_t mix(uint64_t x){x^=x>>33;x*=0xff51afd7ed558ccdULL;x^=x>>33;x*=0xc4ceb9fe1a85ec53ULL;x^=x>>33;return x;}
+struct Tables{unsigned char code[256];bool ok[256];Tables(){for(int i=0;i<256;++i){code[i]=0;ok[i]=false;}const char*s="ACGT";for(int i=0;i<4;++i){code[(unsigned char)s[i]]=i;ok[(unsigned char)s[i]]=true;}}};
+const Tables T;
+double now(){return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
+// Emits (position, hash) of every window minimizer whose k-mer start lies in [s,e). Leftmost on equal hashes.
+// k-mers containing a non-ACGT byte (separators) are never candidates. Each window is W consecutive k-mer starts.
+template<class F> void scan(const unsigned char*t,uint64_t n,uint64_t s,uint64_t e,unsigned K,unsigned W,std::vector<std::pair<uint64_t,uint64_t>>&dq,F&&emit){
+    if(n<K||s>=e)return;
+    uint64_t lo=s>=W-1?s-(W-1):0,hi=std::min<uint64_t>(e+W-1,n-K+1);
+    if(lo>=hi)return;
+    const uint64_t mask=K==32?~0ull:((1ull<<(2*K))-1);
+    const size_t cap=W+1;if(dq.size()<cap)dq.resize(cap);
+    size_t head=0,count=0;uint64_t v=0,run=0,last=UINT64_MAX;
+    for(unsigned i=0;i+1<K;++i){auto c=t[lo+i];if(T.ok[c]){v=((v<<2)|T.code[c])&mask;++run;}else{v=0;run=0;}}
+    for(uint64_t q=lo;q<hi;++q){
+        auto c=t[q+K-1];if(T.ok[c]){v=((v<<2)|T.code[c])&mask;++run;}else{v=0;run=0;}
+        if(run>=K){uint64_t h=mix(v);while(count&&dq[(head+count-1)%cap].second>h)--count;dq[(head+count)%cap]={q,h};++count;}
+        while(count&&dq[head].first+W<=q){head=(head+1)%cap;--count;}
+        if(q>=lo+W-1&&count){auto m=dq[head];if(m.first!=last){last=m.first;if(m.first>=s&&m.first<e)emit(m.first,m.second);}}
+    }
+}
+inline uint64_t fwd_match(const unsigned char*p,const unsigned char*q,uint64_t lim){uint64_t i=0;
+    for(;i+8<=lim;i+=8){uint64_t a,b;memcpy(&a,p+i,8);memcpy(&b,q+i,8);if(a!=b)return i+(__builtin_ctzll(a^b)>>3);}
+    for(;i<lim&&p[i]==q[i];++i);return i;}
+inline uint64_t bwd_match(const unsigned char*p,const unsigned char*q,uint64_t lim){uint64_t i=0; // compares p[-1-i] with q[-1-i]
+    for(;i+8<=lim;i+=8){uint64_t a,b;memcpy(&a,p-i-8,8);memcpy(&b,q-i-8,8);if(a!=b)return i+(__builtin_clzll(a^b)>>3);}
+    for(;i<lim&&p[-1-i]==q[-1-i];++i);return i;}
+struct Cand{uint64_t y,x,n;};
+inline bool cand_less(const Cand&p,const Cand&q){return p.y!=q.y?p.y<q.y:p.n!=q.n?p.n>q.n:p.x<q.x;}
+inline bool cand_eq(const Cand&p,const Cand&q){return p.y==q.y&&p.x==q.x&&p.n==q.n;}
+template<class F> void parallel(size_t count,unsigned threads,F&&f){std::atomic<size_t>next{0};
+    auto work=[&]{for(size_t i;(i=next.fetch_add(1))<count;)f(i);};
+    std::vector<std::thread>pool;for(unsigned i=1;i<threads;++i)pool.emplace_back(work);work();for(auto&th:pool)th.join();}
+}
 int main(int argc,char**argv){try{
-    if(argc==2&&!strcmp(argv[1],"--help")){puts("joint-copy TEXT DICT PARSE SAI A_PREFIX B_PREFIX OUTPUT_COPIES OUTPUT_KEEP THREADS\nPinned Big-BWT parse: window=10; 4-byte phrase IDs; 5-byte ending positions.\nBuilds a 64-bit token SA (not a DNA SA), verifies copy bytes and native mark equivalence; writes residual marked-position bitmap.");return 0;}
-    if(argc!=10)pm::fail("usage: joint-copy TEXT DICT PARSE SAI A_PREFIX B_PREFIX OUTPUT_COPIES OUTPUT_KEEP THREADS");
-    unsigned threads=std::stoul(argv[9]);if(!threads||threads>32)pm::fail("joint thread budget must be 1..32");
-    auto a=pm::Meta::read(std::string(argv[5])+".meta"),b=pm::Meta::read(std::string(argv[6])+".meta");
-    pm::Map text(argv[1]),dict(argv[2]),parse(argv[3]),sai(argv[4]);pm::Map abits(std::string(argv[5])+".bits"),bbits(std::string(argv[6])+".bits");
-    if(text.size!=a.n+b.n||parse.size%4||sai.size/5!=parse.size/4||sai.size%5||abits.size!=(a.n+7)/8||bbits.size!=(b.n+7)/8)pm::fail("joint parse/mark dimensions mismatch");
-    if(dict.data[dict.size-1]!=0)pm::fail("missing PFP dictionary terminator");
-    std::vector<uint64_t>lens(1);uint64_t length=0;
-    for(uint64_t i=0;i<dict.size;++i){auto x=dict.data[i];if(x==1){lens.push_back(length);length=0;}else if(!x){if(i+1!=dict.size||length)pm::fail("invalid PFP dictionary terminator");}else ++length;}
-    std::vector<Segment>segments;
-    for(unsigned s=0;s<2;++s){auto&m=s?b:a;uint64_t offset=s?a.n:0;for(uint32_t c=0;c<m.contigs.size();++c){auto&v=m.contigs[c];if(v.forward==UINT64_MAX)continue;for(unsigned rev=0;rev<2;++rev){auto pos=offset+(rev?v.reverse:v.forward);segments.push_back({pos,pos+v.length,c,bool(rev),!s});}}}
-    std::sort(segments.begin(),segments.end(),[](auto&x,auto&y){return x.begin<y.begin;});
-    std::vector<int64_t>tokens,positions,owners,sa,lcp,isa;uint64_t separator=lens.size(),prior=0;
-    const uint64_t count=parse.size/4;tokens.reserve(count+segments.size());positions.reserve(count);owners.reserve(count);size_t current=SIZE_MAX;
-    for(uint64_t i=0;i<count;++i){uint64_t id=0,end=0;for(unsigned j=0;j<4;++j)id|=uint64_t(parse.data[4*i+j])<<(8*j);for(unsigned j=0;j<5;++j)end|=uint64_t(sai.data[5*i+j])<<(8*j);
-        if(!id||id>=lens.size()||end<prior)pm::fail("invalid PFP phrase rank/endpoint");prior=end;
-        if(i==0&&end+1==lens[id])continue; // Synthetic leading '$' has no original coordinate.
-        if(end<lens[id])pm::fail("invalid PFP phrase start");uint64_t start=end-lens[id];
-        auto it=std::upper_bound(segments.begin(),segments.end(),start,[](uint64_t x,const Segment&s){return x<s.begin;});
-        size_t owner=SIZE_MAX;if(it!=segments.begin()){--it;if(start>=it->begin&&end<=it->end&&(it->reference||!it->reverse))owner=it-segments.begin();}
-        if(owner==SIZE_MAX){current=SIZE_MAX;continue;}
-        if(owner!=current){tokens.push_back(separator++);positions.push_back(-1);owners.push_back(-1);current=owner;}
-        tokens.push_back(id);positions.push_back(start);owners.push_back(owner);
-    }
-    tokens.push_back(separator++);positions.push_back(-1);owners.push_back(-1);
-    uint64_t n=tokens.size();if(n>INT64_MAX||separator>INT64_MAX)pm::fail("joint token integer overflow");
-    sa.resize(n);isa.resize(n);lcp.resize(n);
-    // The vendored version fixes OpenMP teams smaller than requested. Serial is also correct.
-#ifdef LIBSAIS_OPENMP
-    auto code=libsais64_long_omp(tokens.data(),sa.data(),n,separator,0,threads);
-#else
-    auto code=libsais64_long(tokens.data(),sa.data(),n,separator,0);
-#endif
-    if(code)pm::fail("libsais64_long failed with: "+std::to_string(code));
-    for(uint64_t i=0;i<n;++i)isa[sa[i]]=i;
-    uint64_t h=0;for(uint64_t i=0;i<n;++i){auto rank=isa[i];if(!rank){h=0;continue;}auto j=sa[rank-1];while(i+h<n&&j+h<int64_t(n)&&tokens[i+h]==tokens[j+h])++h;lcp[rank]=h;if(h)--h;}
-    std::vector<int64_t>best(n,-1),span(n,0);
-    auto reference=[&](int64_t p){return owners[p]>=0&&segments[owners[p]].reference;};
-    auto take=[&](int64_t dst,int64_t src,int64_t len){if(len>span[dst]||(len==span[dst]&&len&&positions[src]<positions[best[dst]])){best[dst]=src;span[dst]=len;}};
-    int64_t nearest=-1,common=INT64_MAX;
-    for(uint64_t i=0;i<n;++i){if(nearest>=0)common=std::min(common,lcp[i]);if(reference(sa[i])){nearest=sa[i];common=INT64_MAX;}else if(nearest>=0&&owners[sa[i]]>=0)take(sa[i],nearest,common);}
-    nearest=-1;common=INT64_MAX;
-    for(uint64_t i=n;i-->0;){if(nearest>=0)common=std::min(common,lcp[i+1]);if(reference(sa[i])){nearest=sa[i];common=INT64_MAX;}else if(nearest>=0&&owners[sa[i]]>=0)take(sa[i],nearest,common);}
-    std::vector<jc::Copy>copies;std::vector<bool>whole(b.contigs.size());
-    // Whole-contig identity also covers low-complexity texts without internal
-    // PFP triggers. CRC only selects candidates; every byte is compared exactly.
-    auto dna_crc=[&](const Segment&s){uLong value=crc32(0,nullptr,0);for(uint64_t at=s.begin;at<s.end;){auto bytes=std::min<uint64_t>(8u<<20,s.end-at);value=crc32(value,text.data+at,bytes);at+=bytes;}return uint32_t(value);};
-    std::map<std::pair<uint64_t,uint32_t>,std::vector<size_t>>by_digest;
-    for(size_t i=0;i<segments.size();++i){auto&s=segments[i];if(s.reference&&s.end-s.begin>=40)by_digest[{s.end-s.begin,dna_crc(s)}].push_back(i);}
-    for(auto&t:segments){if(t.reference||t.reverse||t.end-t.begin<40)continue;auto candidates=by_digest.find({t.end-t.begin,dna_crc(t)});if(candidates==by_digest.end())continue;for(auto index:candidates->second){auto&s=segments[index];if(!memcmp(text.data+s.begin,text.data+t.begin,t.end-t.begin)){copies.push_back({s.c,t.c,0,0,t.end-t.begin,s.reverse});whole[t.c]=true;break;}}}
-    uint64_t used=0;size_t target=SIZE_MAX;
-    for(uint64_t i=0;i<n;++i){if(owners[i]<0||segments[owners[i]].reference||!span[i])continue;auto&t=segments[owners[i]];if(whole[t.c])continue;auto&s=segments[owners[best[i]]];if(target!=size_t(owners[i])){target=owners[i];used=t.begin;}
-        uint64_t y=positions[i];if(y<used)continue;uint64_t x=positions[best[i]],end=y;
-        auto last=i+span[i]-1;if(last>=n||owners[last]!=owners[i])pm::fail("token copy crossed target segment");end=positions[last]+lens[tokens[last]];
-        uint64_t len=end-y;if(x>s.end||len>s.end-x||len>t.end-y)pm::fail("token copy crossed source segment");
-        while(y>used&&x>s.begin&&text.data[y-1]==text.data[x-1]){--y;--x;++len;}
-        while(y+len<t.end&&x+len<s.end&&text.data[y+len]==text.data[x+len])++len;
-        if(len<40)continue;if(memcmp(text.data+x,text.data+y,len))pm::fail("PFP copy DNA mismatch");
-        jc::Copy r{s.c,t.c,s.reverse?s.end-x-len:x-s.begin,y-t.begin,len,s.reverse};
-        if(!copies.empty()){auto&prev=copies.back();bool adjacent=prev.b==r.b&&prev.a==r.a&&prev.reverse==r.reverse&&prev.y+prev.n==r.y&&(r.reverse?r.x+r.n==prev.x:prev.x+prev.n==r.x);
-            if(adjacent){prev.n+=r.n;if(r.reverse)prev.x=r.x;}else copies.push_back(r);
-        }else copies.push_back(r);used=y+len;
-    }
-    // Sub-phrase re-anchoring. Token matches are whole PFP phrases, so an exact run that lies between two
-    // nearby differences (SNP/indel) and contains no complete reference phrase has no token seed. Every
-    // such run is recovered here: inside the target gap between two consecutive copies, all maximal exact
-    // runs of >=40 bp on the flanking copies' source segments within a diagonal band are copied (16-mer
-    // seeds, exact byte extension). Gaps are independent, so the result does not depend on the thread count.
-    const uint64_t token_copies=copies.size();uint64_t gap_copies=0,gap_bases=0,gap_rounds=0;std::vector<uint64_t>round_copies;
-    {
-        std::sort(copies.begin(),copies.end(),[](auto&x,auto&y){return x.b==y.b?x.y<y.y:x.b<y.b;});
-        std::vector<int64_t>afwd(a.contigs.size(),-1),arev(a.contigs.size(),-1),bfwd(b.contigs.size(),-1);
-        for(size_t k=0;k<segments.size();++k){auto&sg=segments[k];if(sg.reference)(sg.reverse?arev:afwd)[sg.c]=k;else if(!sg.reverse)bfwd[sg.c]=k;}
-        const int64_t band=jc::kBand;constexpr unsigned K=16;
-        struct Found{uint64_t y,x,n;uint32_t seg;};
-        struct Gap{int64_t left,right;uint32_t b;};
-        struct Scratch{std::vector<int32_t>head,next;std::vector<uint32_t>key;std::vector<uint64_t>last;std::vector<Found>found;};
-        auto src_of=[&](const jc::Copy&c,uint64_t&x){auto k=c.reverse?arev[c.a]:afwd[c.a];auto&sg=segments[k];x=c.reverse?sg.end-c.x-c.n:sg.begin+c.x;return size_t(k);};
-        auto code=[&](uint64_t at){uint32_t v=0;for(unsigned i=0;i<K;++i)v=v<<2|((text.data[at+i]>>1)&3);return v;};
-        auto search=[&](Scratch&sc,size_t seg,int64_t diag,uint64_t g0,uint64_t g1){
-            auto&s=segments[seg];
-            int64_t lo=std::max<int64_t>(s.begin,int64_t(g0)+diag-band),hi=std::min<int64_t>(s.end,int64_t(g1)+diag+band);
-            if(hi-lo<K)return;
-            for(uint64_t w0=g0;w0<g1;w0+=1u<<20){uint64_t w1=std::min<uint64_t>(g1,w0+(1u<<20));
-                if(w1-w0<40)continue;
-                int64_t slo=std::max<int64_t>(lo,int64_t(w0)+diag-band),shi=std::min<int64_t>(hi,int64_t(w1)+diag+band);
-                if(shi-slo<K)continue;
-                uint64_t count=w1-w0-K+1;unsigned bits=4;while((1ull<<bits)<2*count)++bits;
-                sc.head.assign(size_t(1)<<bits,-1);sc.next.resize(count);sc.key.resize(count);
-                uint32_t v=code(w0);
-                for(uint64_t i=0;i<count;++i){if(i)v=v<<2|((text.data[w0+i+K-1]>>1)&3);sc.key[i]=v;uint32_t h=(v*2654435761u)>>(32-bits);sc.next[i]=sc.head[h];sc.head[h]=int32_t(i);}
-                sc.last.assign(2*band+1,0);
-                int64_t first=(slo+7)&~int64_t(7);
-                for(int64_t j=first;j+K<=shi;j+=8){
-                    uint32_t q=code(j);uint32_t h=(q*2654435761u)>>(32-bits);
-                    for(int32_t i=sc.head[h];i>=0;i=sc.next[i]){if(sc.key[i]!=q)continue;
-                        uint64_t y=w0+i;int64_t d=j-int64_t(y)-diag;if(d<-band||d>band)continue;
-                        uint64_t&last=sc.last[d+band];if(y<last)continue;
-                        uint64_t ys=y,xs=j,ye=y+K;
-                        while(ys>w0&&xs>s.begin&&text.data[ys-1]==text.data[xs-1]){--ys;--xs;}
-                        while(ye<w1&&xs+(ye-ys)<s.end&&text.data[ye]==text.data[xs+(ye-ys)])++ye;
-                        last=ye;
-                        if(ye-ys>=40)sc.found.push_back({ys,xs,ye-ys,uint32_t(seg)});
-                    }
-                }
-            }
-        };
-        std::vector<char>fresh;
-        for(unsigned round=0;round<jc::kRounds;++round){
-            std::vector<Gap>gaps;
-            for(size_t i=0;i<copies.size();){size_t e=i;while(e<copies.size()&&copies[e].b==copies[i].b)++e;uint32_t bb=copies[i].b;
-                if(bfwd[bb]>=0){
-                    auto need=[&](int64_t l,int64_t r){return round==0||(l>=0&&fresh[l])||(r>=0&&fresh[r]);};
-                    if(need(-1,int64_t(i)))gaps.push_back({-1,int64_t(i),bb});
-                    for(size_t k=i+1;k<e;++k)if(need(k-1,k))gaps.push_back({int64_t(k-1),int64_t(k),bb});
-                    if(need(int64_t(e-1),-1))gaps.push_back({int64_t(e-1),-1,bb});
-                }
-                i=e;}
-            const size_t chunk=2048,chunks=(gaps.size()+chunk-1)/chunk;std::vector<std::vector<jc::Copy>>made(chunks);std::atomic<size_t>next{0};
-            auto work=[&]{Scratch sc;for(size_t c;(c=next.fetch_add(1))<chunks;){
-                for(size_t gi=c*chunk;gi<std::min(gaps.size(),(c+1)*chunk);++gi){auto&g=gaps[gi];auto&t=segments[bfwd[g.b]];
-                    uint64_t g0=g.left>=0?t.begin+copies[g.left].y+copies[g.left].n:t.begin,g1=g.right>=0?t.begin+copies[g.right].y:t.end;
-                    if(g1<g0+40)continue;sc.found.clear();
-                    int64_t diag[2];size_t seg[2];unsigned hints=0;
-                    for(int64_t idx:{g.left,g.right})if(idx>=0){uint64_t x;auto sg=src_of(copies[idx],x);int64_t d=int64_t(x)-int64_t(t.begin+copies[idx].y);
-                        if(hints&&seg[0]==sg&&diag[0]==d)continue;seg[hints]=sg;diag[hints]=d;++hints;}
-                    for(unsigned h=0;h<hints;++h)search(sc,seg[h],diag[h],g0,g1);
-                    std::sort(sc.found.begin(),sc.found.end(),[](auto&p,auto&q){return p.y!=q.y?p.y<q.y:p.n!=q.n?p.n>q.n:p.seg!=q.seg?p.seg<q.seg:p.x<q.x;});
-                    uint64_t cursor=g0;
-                    for(auto&f:sc.found){uint64_t end=f.y+f.n;if(end<=cursor)continue;uint64_t y=std::max(f.y,cursor),x=f.x+(y-f.y);if(end-y<40)continue;
-                        uint64_t n=end-y;auto&sg=segments[f.seg];
-                        if(memcmp(text.data+x,text.data+y,n))pm::fail("re-anchored copy DNA mismatch");
-                        made[c].push_back({sg.c,t.c,sg.reverse?sg.end-x-n:x-sg.begin,y-t.begin,n,sg.reverse});cursor=end;}
-                }}};
-            std::vector<std::thread>pool;for(unsigned i=1;i<threads;++i)pool.emplace_back(work);work();for(auto&th:pool)th.join();
-            size_t before=copies.size();for(auto&m:made)for(auto&r:m){copies.push_back(r);gap_bases+=r.n;}
-            if(copies.size()==before)break;gap_copies+=copies.size()-before;round_copies.push_back(copies.size()-before);++gap_rounds;
-            std::sort(copies.begin(),copies.end(),[](auto&x,auto&y){return x.b==y.b?x.y<y.y:x.b<y.b;});
-            // Only gaps next to a copy made in this round can yield more in the next one.
-            std::vector<std::pair<uint32_t,uint64_t>>added;for(auto&m:made)for(auto&r:m)added.push_back({r.b,r.y});std::sort(added.begin(),added.end());
-            fresh.assign(copies.size(),0);
-            for(size_t i=0;i<copies.size();++i)fresh[i]=std::binary_search(added.begin(),added.end(),std::make_pair(copies[i].b,copies[i].y));
-        }
-    }
+    const char*usage="joint-copy TEXT A_PREFIX B_PREFIX OUTPUT_COPIES OUTPUT_KEEP THREADS [--max-occurrences N] [--k N] [--w N]\n"
+        "Minimizer-anchor copy finder over the oriented marked texts (A both strands, B forward). Seeds of k-mers with at most\n"
+        "N reference occurrences (default 1000) are extended to maximal exact runs; seeds above the cap are left to the gap\n"
+        "re-anchoring. k=21, w=20 by default (k+w-1 must not exceed the 40 bp minimum copy). Verifies copy bytes and native mark\n"
+        "equivalence and writes the residual marked-position bitmap.";
+    if(argc==2&&!strcmp(argv[1],"--help")){puts(usage);return 0;}
+    if(argc<7||(argc-7)%2)pm::fail(std::string("usage: ")+usage);
+    const double t0=now();
+    unsigned threads=std::stoul(argv[6]);if(!threads||threads>256)pm::fail("thread budget must be 1..256");
+    unsigned K=21,W=20;uint64_t maxocc=1000;
+    for(int i=7;i<argc;i+=2){std::string o=argv[i];unsigned long v=std::stoul(argv[i+1]);
+        if(o=="--max-occurrences")maxocc=v;else if(o=="--k")K=v;else if(o=="--w")W=v;else pm::fail("unknown option "+o);}
+    const uint64_t WIN=1u<<20,slack=64,penalty=78;
+    if(K<12||K>32||W<1||K+W-1>40||!maxocc)pm::fail("anchor parameters must satisfy 12<=k<=32, w>=1, k+w-1<=40 (the shortest copy) and max occurrences>=1");
+    auto a=pm::Meta::read(std::string(argv[2])+".meta"),b=pm::Meta::read(std::string(argv[3])+".meta");
+    pm::Map text(argv[1]);pm::Map abits(std::string(argv[2])+".bits"),bbits(std::string(argv[3])+".bits");
+    if(text.size!=a.n+b.n||abits.size!=(a.n+7)/8||bbits.size!=(b.n+7)/8)pm::fail("joint text/mark dimensions mismatch");
+    auto segments=make_segments(a,b);Text jt{text.data};const unsigned char*tx=text.data;
+    size_t asegs=0;while(asegs<segments.size()&&segments[asegs].reference)++asegs;
+    for(size_t i=asegs;i<segments.size();++i)if(segments[i].reference)pm::fail("segment table order");
+    // ---- index of the reference text (both strands) ----
+    const double t1=now();
+    const uint64_t N=a.n;const uint64_t chunk=uint64_t(16)<<20;const size_t chunks=(N+chunk-1)/chunk;
+    std::vector<std::atomic<uint32_t>>counts((size_t(1)<<BB)+1);for(auto&c:counts)c.store(0,std::memory_order_relaxed);
+    std::atomic<uint64_t>indexed{0};
+    parallel(chunks,threads,[&](size_t c){std::vector<std::pair<uint64_t,uint64_t>>dq;uint64_t local=0;
+        scan(tx,N,c*chunk,std::min<uint64_t>(N,(c+1)*chunk),K,W,dq,[&](uint64_t,uint64_t h){counts[h>>(64-BB)].fetch_add(1,std::memory_order_relaxed);++local;});indexed+=local;});
+    std::vector<uint64_t>off((size_t(1)<<BB)+1);uint64_t total=0;for(size_t i=0;i<(size_t(1)<<BB);++i){off[i]=total;total+=counts[i].load();}off[size_t(1)<<BB]=total;
+    if(total!=indexed.load())pm::fail("anchor index count mismatch");
+    std::vector<uint64_t>entries(std::max<uint64_t>(1,total));
+    for(size_t i=0;i<(size_t(1)<<BB);++i)counts[i].store(0);
+    parallel(chunks,threads,[&](size_t c){std::vector<std::pair<uint64_t,uint64_t>>dq;
+        scan(tx,N,c*chunk,std::min<uint64_t>(N,(c+1)*chunk),K,W,dq,[&](uint64_t p,uint64_t h){size_t bk=h>>(64-BB);uint64_t tag=(h>>(64-BB-TAGB))&((1ull<<TAGB)-1);
+            entries[off[bk]+counts[bk].fetch_add(1,std::memory_order_relaxed)]=(tag<<40)|p;});});
+    parallel(size_t(1)<<BB,threads,[&](size_t bk){std::sort(entries.begin()+off[bk],entries.begin()+off[bk+1]);});
+    counts=std::vector<std::atomic<uint32_t>>();
+    const double t2=now();
+    // ---- anchors of every target forward contig ----
+    struct Win{size_t seg;uint64_t s,e;};std::vector<Win>wins;
+    std::vector<bool>whole;std::vector<jc::Copy>copies;whole_contigs(jt,segments,b,copies,whole);
+    const size_t whole_copies=copies.size();
+    std::vector<size_t>tsegs;
+    for(size_t k=asegs;k<segments.size();++k){auto&t=segments[k];if(t.reverse||whole[t.c])continue;tsegs.push_back(k);
+        for(uint64_t s=t.begin;s<t.end;s+=WIN)wins.push_back({k,s,std::min<uint64_t>(t.end,s+WIN)});}
+    std::vector<std::vector<Cand>>found(wins.size());
+    std::atomic<uint64_t>queries{0},skipped{0},hits{0},extended{0};
+    constexpr size_t CACHE=1<<16;
+    parallel(wins.size(),threads,[&](size_t wi){
+        auto&w=wins[wi];auto&t=segments[w.seg];auto&out=found[wi];
+        std::vector<std::pair<uint64_t,uint64_t>>dq;
+        std::vector<int64_t>cdiag(CACHE,INT64_MIN);std::vector<uint64_t>cend(CACHE,0);
+        uint64_t q=0,sk=0,ht=0,ex=0;
+        scan(tx,text.size,w.s,w.e,K,W,dq,[&](uint64_t y,uint64_t h){
+            ++q;size_t bk=h>>(64-BB);uint64_t tag=(h>>(64-BB-TAGB))&((1ull<<TAGB)-1);
+            auto first=entries.begin()+off[bk],last=entries.begin()+off[bk+1];
+            auto lo=std::lower_bound(first,last,tag<<40);auto hi=std::upper_bound(lo,last,(tag<<40)|POSMASK);
+            uint64_t c=hi-lo;if(!c)return;
+            auto try_hit=[&](uint64_t x)->bool{++ht;
+                int64_t diag=int64_t(x)-int64_t(y);size_t slot=(mix(uint64_t(diag))>>40)&(CACHE-1);
+                if(cdiag[slot]==diag&&y<cend[slot])return false;
+                auto sit=std::upper_bound(segments.begin(),segments.begin()+asegs,x,[](uint64_t v,const Segment&s){return v<s.begin;});
+                if(sit==segments.begin())return false;--sit;auto&s=*sit;if(x>=s.end||x+K>s.end)return false;
+                ++ex;
+                uint64_t right=fwd_match(tx+y,tx+x,std::min<uint64_t>(t.end-y,s.end-x));
+                if(right<K)return false; // hash/tag collision
+                uint64_t left=bwd_match(tx+y,tx+x,std::min<uint64_t>(y-t.begin,x-s.begin));
+                cdiag[slot]=diag;cend[slot]=y+right;
+                if(left+right>=40){out.push_back({y-left,x-left,left+right});return true;}
+                return false;};
+            if(c>maxocc){++sk;return;} // repeat seed: left to the gap re-anchoring
+            for(auto it=lo;it!=hi;++it)try_hit(*it&POSMASK);
+        });
+        std::sort(out.begin(),out.end(),cand_less);out.erase(std::unique(out.begin(),out.end(),cand_eq),out.end());
+        { // a run contained in an earlier-starting run of the same window cannot extend any chain
+            size_t keepn=0;uint64_t reach=0;for(size_t i=0;i<out.size();++i){uint64_t e=out[i].y+out[i].n;if(e>reach){reach=e;out[keepn++]=out[i];}}out.resize(keepn);out.shrink_to_fit();}
+        queries+=q;skipped+=sk;hits+=ht;extended+=ex;});
+    const double t3=now();
+    // ---- deterministic disjoint selection per target contig ----
+    std::vector<std::vector<jc::Copy>>made(tsegs.size());std::vector<uint64_t>ncand(tsegs.size(),0);
+    {size_t wi=0;
+     std::vector<std::pair<size_t,size_t>>range(tsegs.size());
+     for(size_t i=0;i<tsegs.size();++i){size_t b0=wi;while(wi<wins.size()&&wins[wi].seg==tsegs[i])++wi;range[i]={b0,wi};}
+     parallel(tsegs.size(),threads,[&](size_t i){auto&t=segments[tsegs[i]];std::vector<Cand>c;
+        for(size_t w=range[i].first;w<range[i].second;++w){c.insert(c.end(),found[w].begin(),found[w].end());std::vector<Cand>().swap(found[w]);}
+        std::sort(c.begin(),c.end(),cand_less);c.erase(std::unique(c.begin(),c.end(),cand_eq),c.end());ncand[i]=c.size();
+        auto&dst=made[i];uint64_t cursor=t.begin,px=UINT64_MAX,pend=0;size_t pos=0;const size_t m=c.size();
+        std::vector<size_t>pool;
+        for(;;){
+            // Candidates whose exact run starts at or before the cursor are trimmed to it. A run that continues the previous
+            // copy's diagonal (SNP between the two) may also start up to `slack` bases later. Switching to another source
+            // costs about two block boundaries (2x39 marked positions), so non-collinear candidates carry that penalty.
+            while(pos<m&&c[pos].y<=cursor+slack)pool.push_back(pos++);
+            int64_t best=-1;int64_t bscore=INT64_MIN;uint64_t bend=0,bstart=0,next_start=UINT64_MAX;
+            const int64_t pdiag=px==UINT64_MAX?0:int64_t(px)-int64_t(pend);
+            size_t keep=0;
+            for(size_t q=0;q<pool.size();++q){size_t j=pool[q];auto&k=c[j];uint64_t end=k.y+k.n;
+                if(end<cursor+40)continue; // can never yield a block of 40 again
+                pool[keep++]=j;
+                bool col=px!=UINT64_MAX&&pend==cursor&&int64_t(k.x)-int64_t(k.y)==pdiag;
+                if(k.y>cursor){next_start=std::min(next_start,k.y);if(!col)continue;}
+                uint64_t start=std::max<uint64_t>(k.y,cursor);if(end-start<40)continue;
+                int64_t score=int64_t(end)-int64_t(start-cursor)-(col?0:int64_t(penalty));
+                bool take=best<0||score>bscore;
+                if(!take&&score==bscore){int64_t a1=int64_t(k.x)+int64_t(start-k.y),a0=int64_t(c[best].x)+int64_t(bstart-c[best].y);take=a1<a0;}
+                if(take){best=j;bscore=score;bend=end;bstart=start;}}
+            pool.resize(keep);
+            if(best>=0){cursor=bstart;auto&k=c[best];uint64_t sx=k.x+(cursor-k.y),n=bend-cursor;
+                auto sit=std::upper_bound(segments.begin(),segments.begin()+asegs,sx,[](uint64_t v,const Segment&s){return v<s.begin;});--sit;auto&s=*sit;
+                if(memcmp(tx+sx,tx+cursor,n))pm::fail("anchor copy DNA mismatch");
+                jc::Copy r{s.c,t.c,s.reverse?s.end-sx-n:sx-s.begin,cursor-t.begin,n,s.reverse};
+                if(!dst.empty()){auto&prev=dst.back();bool adjacent=prev.a==r.a&&prev.reverse==r.reverse&&prev.y+prev.n==r.y&&(r.reverse?r.x+r.n==prev.x:prev.x+prev.n==r.x);
+                    if(adjacent){prev.n+=r.n;if(r.reverse)prev.x=r.x;}else dst.push_back(r);}else dst.push_back(r);
+                px=sx+n;pend=bend; // end of the previous source run (text coordinates) and of the target run
+                cursor=bend;continue;}
+            if(pos<m)next_start=std::min(next_start,c[pos].y);
+            if(next_start==UINT64_MAX)break;cursor=next_start;}
+     });}
+    uint64_t ncands=0;for(auto v:ncand)ncands+=v;
+    for(auto&v:made)for(auto&r:v)copies.push_back(r);
+    {std::vector<std::vector<Cand>>().swap(found);std::vector<uint64_t>().swap(entries);}
     std::sort(copies.begin(),copies.end(),[](auto&x,auto&y){return x.b==y.b?x.y<y.y:x.b<y.b;});
-    std::vector<unsigned char>keep(bbits.data,bbits.data+bbits.size);uint64_t inherited=0,covered=0;
-    auto bits=[](const pm::Map&file,uint64_t at,unsigned count){uint64_t result=0;unsigned shift=at&7;uint64_t byte=at/8;unsigned need=(shift+count+7)/8;
-        if(!count||count>64||byte>=file.size||need>file.size-byte)pm::fail("joint bitmap window out of bounds");
-        for(unsigned i=0;i<std::min<unsigned>(need,8);++i)result|=uint64_t(file.data[byte+i])<<(8*i);
-        result>>=shift;if(need==9)result|=uint64_t(file.data[byte+8])<<(64-shift);
-        if(count<64)result&=(1ull<<count)-1;return result;};
-    auto clear=[&](uint64_t at,uint64_t count){while(count&&(at&7)){keep[at/8]&=~(1u<<(at&7));++at;--count;}auto bytes=count/8;memset(keep.data()+at/8,0,bytes);at+=bytes*8;count-=bytes*8;if(count)keep[at/8]&=~((1u<<count)-1);};
-    for(auto&r:copies){covered+=r.n;for(unsigned reverse=0;reverse<2;++reverse){auto&ac=a.contigs[r.a];auto&bc=b.contigs[r.b];uint64_t count=r.n-39;
-        uint64_t ap=(reverse^r.reverse)?ac.reverse+ac.length-r.x-r.n:ac.forward+r.x;
-        uint64_t bp=reverse?bc.reverse+bc.length-r.y-r.n:bc.forward+r.y;
-        for(uint64_t offset=0;offset<count;offset+=64){unsigned n=std::min<uint64_t>(64,count-offset);auto av=bits(abits,ap+offset,n),bv=bits(bbits,bp+offset,n);
-            if(av!=bv)pm::fail("native sampler is not invariant within a complete copied 40-mer: target contig "+std::to_string(r.b)+" oriented bit "+std::to_string(bp+offset));
-            inherited+=__builtin_popcountll(bv);
-        }clear(bp,count);
-    }}
-    uint64_t remaining=0;for(auto v:keep)remaining+=__builtin_popcount(unsigned(v));if(remaining+inherited!=b.marks)pm::fail("joint inherited/residual mark accounting mismatch");
-    jc::save(argv[7],copies);std::ofstream out(argv[8],std::ios::binary);out.write((char*)keep.data(),keep.size());out.close();if(!out)pm::fail("write joint residual bitmap");
-    std::cout<<"{\"status\":\"PASS\",\"token_suffixes\":"<<n<<",\"copy_blocks\":"<<copies.size()<<",\"token_copy_blocks\":"<<token_copies<<",\"reanchored_copy_blocks\":"<<gap_copies<<",\"reanchor_rounds\":"<<gap_rounds<<",\"reanchor_round_copies\":["<<[&]{std::string o;for(size_t i=0;i<round_copies.size();++i)o+=(i?",":"")+std::to_string(round_copies[i]);return o;}()<<"]"<<",\"copied_bases\":"<<covered<<",\"inherited_occurrences\":"<<inherited<<",\"residual_occurrences\":"<<remaining<<",\"target_occurrences\":"<<b.marks<<"}\n";
-}catch(const std::exception&e){std::cerr<<"joint-copy failed: "<<e.what()<<'\n';return 1;}}
+    const uint64_t anchor_copies=copies.size();
+    const double t4=now();
+    auto rs=reanchor(jt,segments,a,b,copies,threads);
+    const double t5=now();
+    auto vr=verify_keep(copies,a,b,abits,bbits);
+    const double t6=now();
+    jc::save(argv[4],copies);std::ofstream out(argv[5],std::ios::binary);out.write((char*)vr.keep.data(),vr.keep.size());out.close();if(!out)pm::fail("write joint residual bitmap");
+    struct rusage ru;getrusage(RUSAGE_SELF,&ru);
+    std::cout<<"{\"status\":\"PASS\",\"finder\":\"minimizer-anchor\",\"k\":"<<K<<",\"w\":"<<W<<",\"max_occurrences\":"<<maxocc
+        <<",\"indexed_minimizers\":"<<total<<",\"target_queries\":"<<queries.load()<<",\"queries_over_max_occurrence\":"<<skipped.load()<<",\"hits\":"<<hits.load()<<",\"extensions\":"<<extended.load()
+        <<",\"candidates\":"<<ncands<<",\"whole_contig_copies\":"<<whole_copies<<",\"copy_blocks\":"<<copies.size()<<",\"anchor_copy_blocks\":"<<anchor_copies<<",\"reanchored_copy_blocks\":"<<rs.gap_copies
+        <<",\"reanchor_rounds\":"<<rs.gap_rounds<<",\"reanchor_round_copies\":["<<[&]{std::string o;for(size_t i=0;i<rs.round_copies.size();++i)o+=(i?",":"")+std::to_string(rs.round_copies[i]);return o;}()<<"]"
+        <<",\"copied_bases\":"<<vr.covered<<",\"inherited_occurrences\":"<<vr.inherited<<",\"residual_occurrences\":"<<vr.remaining<<",\"target_occurrences\":"<<b.marks
+        <<",\"seconds\":{\"setup\":"<<t1-t0<<",\"index\":"<<t2-t1<<",\"anchors\":"<<t3-t2<<",\"select\":"<<t4-t3<<",\"reanchor\":"<<t5-t4<<",\"verify\":"<<t6-t5<<",\"total\":"<<t6-t0<<"}"
+        <<",\"peak_rss_kib\":"<<ru.ru_maxrss<<",\"user_seconds\":"<<ru.ru_utime.tv_sec+ru.ru_utime.tv_usec*1e-6<<",\"sys_seconds\":"<<ru.ru_stime.tv_sec+ru.ru_stime.tv_usec*1e-6<<"}\n";
+}catch(const std::exception&e){std::cerr<<"anchor-copy failed: "<<e.what()<<'\n';return 1;}}

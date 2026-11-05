@@ -1,7 +1,7 @@
 # FastGA Joint Index
 
 从 FASTA 直接构建的双基因组无损联合索引。完整保留参考基因组的种子位置，
-用 PFP 发现的精确拷贝块表示另一基因组的共享位置，只单独存储剩余位置。
+用 minimizer 锚点发现的精确拷贝块表示另一基因组的共享位置，只单独存储剩余位置。
 读取时恢复完整位置及出现次数，继续调用 FastGA 的播种、链化和局部比对。
 
 核心 C/C++ 代码与已验证版本逐字节一致；本仓库将其独立构建、测试和文档化，
@@ -10,16 +10,16 @@
 ## 主要来源与归属
 
 **本项目的主要来源是 PFP（Prefix-Free Parsing）和
-[SXGC](https://github.com/pangenome/sxgc)。** PFP 提供短语解析，用于发现共享精确
-拷贝的锚点；共享索引代码最初在 SXGC 工作区中作为 FastGA 集成开发，再整理为
+[SXGC](https://github.com/pangenome/sxgc)。** PFP 提供可选的 Big-BWT 后缀排序后端；共享精确
+拷贝由 minimizer 锚点查找器发现；共享索引代码最初在 SXGC 工作区中作为 FastGA 集成开发，再整理为
 本独立仓库。[CORE_SOURCES.json](CORE_SOURCES.json) 记录了提取的 C/C++ 源码校验和。
 
 | 来源 | 在本项目中的作用 |
 |---|---|
-| [PFP：Boucher 等，2019](https://doi.org/10.1186/s13015-019-0148-5)；实现为 [Big-BWT](https://gitlab.com/manzai/Big-BWT) | 短语解析和共享拷贝锚点；可选的 PFP 后缀排序后端 |
+| [PFP：Boucher 等，2019](https://doi.org/10.1186/s13015-019-0148-5)；实现为 [Big-BWT](https://gitlab.com/manzai/Big-BWT) | 可选的 PFP 后缀排序后端 |
 | [SXGC](https://github.com/pangenome/sxgc) | 共享索引集成、构建和验证流程的原始研发工作区 |
 | [FastGA：Myers 与 Zhou](https://github.com/thegenemyers/FASTGA) | 原有采样、播种、链化、局部比对、GDB 和输出格式 |
-| [libsais](https://github.com/IlyaGrebnov/libsais) | 短语 token 的后缀数组和 LCP 构建 |
+| [libsais](https://github.com/IlyaGrebnov/libsais) | PFP 后端中解析与字典的后缀数组和 LCP 构建 |
 
 本仓库整理了 FastGA 兼容的共享种子表示、精确拷贝与残余位置编码、读取适配及
 单命令入口。SXGC 的 suffixient-array 形式化证明适用于其自身结构；本适配器以
@@ -82,7 +82,7 @@ FastGA-shared -T24 -pafx indexes/joint/A.gix indexes/joint/B.gix > A-to-B.paf
 `genome-A.fa`、`genome-B.fa` 指你自己的输入，也支持 `.fa.gz`；输出目录必须不存在。
 `--threads` 是构建总预算，范围为 1–32；低线程时原生排序采用顺序种子流，
 PFP 排序至少需要 2 个线程。默认使用原生排序；添加
-`--backend pfp` 可替换排序阶段。两种模式均使用 PFP 查找共享拷贝块。
+`--backend pfp` 可替换排序阶段。两种模式均用 minimizer 锚点查找共享拷贝块，仅 pfp 后端使用 PFP 解析。
 `build/` 内记录真实编译命令和源文件/可执行文件校验和。
 
 `GIXmake-shared --help` 列出完整参数；默认 `--storage auto` 在两个输入时选择

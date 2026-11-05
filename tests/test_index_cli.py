@@ -170,7 +170,7 @@ def main():
                     (['--storage','source','--reference','A'],'--reference is only used'),
                     (['--implicit-mask','unknown'],'unknown sample'),
                     (['--input','a='+str(inputs['B'])],'unique ignoring ASCII case'),
-                    (['--input','B='+str(inputs['B']),'--storage','joint','--pfp-window','8'],'joint v4 requires'),
+                    (['--input','B='+str(inputs['B']),'--storage','joint','--backend','pfp','--pfp-window','8'],'joint v4 requires'),
                     (['--log-dir',root/'annotations'],'log directory already exists')]
             for i,(options,message) in enumerate(errors):
                 output=root/('EXPECTED_TEST_REJECTION-'+str(i))

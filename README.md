@@ -4,8 +4,8 @@
 
 An experimental, lossless, two-genome index backend for FastGA. Build directly
 from FASTA, store reference occurrences once, and represent matching query
-occurrences through exact relative copies plus residual positions. PFP supplies
-copy anchors; FastGA still performs the adaptive seeding, chaining and alignment.
+occurrences through exact relative copies plus residual positions. A
+minimizer-anchor finder supplies the copies; FastGA still performs the adaptive seeding, chaining and alignment.
 
 The lossless storage contract originates in the validated integration.
 This standalone repository maintains the C/C++ implementation, including reader
@@ -15,17 +15,17 @@ portable benchmark drivers. It does not require the original SXGC repository.
 ## Origins and attribution
 
 **The main foundations of this project are Prefix-Free Parsing (PFP) and
-[SXGC](https://github.com/pangenome/sxgc).** PFP provides the phrase parsing used
-to discover shared exact-copy anchors. The shared-index code was developed as a
+[SXGC](https://github.com/pangenome/sxgc).** PFP provides the optional Big-BWT
+suffix-ordering backend (shared exact copies are found by a minimizer-anchor finder). The shared-index code was developed as a
 FastGA integration in the SXGC workspace and extracted into this repository;
 [CORE_SOURCES.json](CORE_SOURCES.json) records the imported C/C++ snapshot.
 
 | Source | Contribution used here |
 |---|---|
-| [PFP, Boucher et al. (2019)](https://doi.org/10.1186/s13015-019-0148-5), implemented in [Big-BWT](https://gitlab.com/manzai/Big-BWT) | Phrase parsing for copy anchors; optional PFP suffix-ordering backend |
+| [PFP, Boucher et al. (2019)](https://doi.org/10.1186/s13015-019-0148-5), implemented in [Big-BWT](https://gitlab.com/manzai/Big-BWT) | Optional PFP suffix-ordering backend |
 | [SXGC](https://github.com/pangenome/sxgc) | Originating research/code workspace for this shared-index integration and its construction/validation workflow |
 | [FastGA, Myers and Zhou](https://github.com/thegenemyers/FASTGA) | Original genome sampler, seed processing, chaining, local alignment, GDB and output formats |
-| [libsais](https://github.com/IlyaGrebnov/libsais) | Phrase-token suffix-array/LCP construction |
+| [libsais](https://github.com/IlyaGrebnov/libsais) | Parse and dictionary suffix-array/LCP construction inside the PFP backend |
 
 This repository packages the FastGA-compatible shared seed representation,
 exact-copy/residual codec, reader adapter and one-command interface. The SXGC
@@ -39,7 +39,7 @@ and [third-party notices](THIRD_PARTY_NOTICES.md).
 
 Build requirements: Linux or macOS, CMake 3.20+, a C11/C++17 compiler, pthread, zlib development
 headers, and `patch`. Linux also needs OpenSSL 1.1+ development files for SHA-256;
-macOS uses system CommonCrypto. Linux builds use OpenMP for libsais by default;
+macOS uses system CommonCrypto. Linux builds use OpenMP for the PFP tools' libsais sorters by default;
 macOS builds use its serial backend by default. JSON for Modern C++ is vendored.
 
 **Index construction and alignment have native C++ entry points.** `GIXmake-shared`
@@ -125,8 +125,8 @@ Construction writes no native `.gix`/`.ktab.*` intermediate indexes.
 Keep the resulting bundle and each view's matching GDB/BPS sequence files.
 
 `--backend native` is the default sorting backend. `--backend pfp` also replaces
-the sorting stage with the pinned Big-BWT backend. Both joint modes use PFP for
-copy detection. Existing v1/v2/v3 readers cannot read v4; use `FastGA-shared` from
+the sorting stage with the pinned Big-BWT backend. Both joint modes find copies with the
+minimizer-anchor finder; only the pfp backend parses with PFP. Existing v1/v2/v3 readers cannot read v4; use `FastGA-shared` from
 the same build. The non-joint storage modes remain available for comparisons.
 
 `GIXmake-shared --help` lists all parameters. Its default `--storage auto` chooses

@@ -51,7 +51,7 @@ def computing_threads(command):
         workers = flag(command, '-t', 0)
         return workers+2 if workers else 1  # workers, producing main thread, ordered writer
     if program == 'joint-copy':
-        return int(command[9])
+        return int(command[6])  # joint-copy TEXT A B COPIES KEEP THREADS
     raise RuntimeError('unknown construction program: '+program)
 
 

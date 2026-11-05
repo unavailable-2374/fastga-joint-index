@@ -83,8 +83,8 @@ The existing frequency, chaining, identity and output options are forwarded to
 the same FastGA driver. The standalone build includes `ALNtoPAF` and `ALNtoPSL`.
 `FastGA-shared --help` prints the entry-point notes and upstream parameter table.
 The automatic FASTA constructor supports 1–32 threads and defaults to native
-sorting with PFP copy detection for joint indexes. Add `--index-backend pfp` to
-select PFP sorting. Both automatic sorting modes require no Python.
+sorting; joint copies come from the minimizer-anchor finder (no PFP parse). Add
+`--index-backend pfp` to select PFP sorting. Both automatic sorting modes require no Python.
 
 ## Standalone C++ indexing
 
@@ -105,7 +105,13 @@ case-insensitively unique sample names. Existing output/log directories are
 rejected, including concurrent publication attempts to the same output.
 
 `--pfp-tools`, `--pfp-window` and `--pfp-modulus` select the pinned tool directory
-and PFP parameters; joint v4 retains its fixed window 10/modulus 100 contract.
+and PFP parameters; joint v4 with the pfp backend retains its fixed window 10/modulus 100
+contract (the native backend does not use them). `FASTGA_SHARED_ANCHOR_MAX_OCCURRENCES=N`
+overrides the copy finder's occurrence cap (default 1000; measurements only).
+On the macaque pair at `-T24`, caps 256 and 1000 give 404.3M and 395.1M residual occurrences; the
+finder takes 79 s and 88 s but the index merge stage 525 s and 435 s (whole build 648 s and 566 s,
+index 13.067 GB and 13.034 GB), so 1000 is the default. A cap of 4096 lowers residuals to 382.3M but
+the finder alone then needs 261 s and 5500 core-seconds.
 PFP sorting needs at least two threads and streams the full DNA suffix array
 through a FIFO. The public bundle appears only after construction passes. The
 complete successful JSON report is on stdout; diagnostics are on stderr.
