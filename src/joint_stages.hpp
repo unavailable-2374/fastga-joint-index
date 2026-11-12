@@ -4,6 +4,7 @@
 #define SXGC_JOINT_STAGES_HPP
 #include "joint_copies.hpp"
 #include <map>
+#include <mutex>
 #include <thread>
 #include <atomic>
 namespace js {
@@ -113,22 +114,33 @@ inline ReanchorStats reanchor(Text text,const std::vector<Segment>&segments,cons
     return st;
 }
 struct VerifyResult {uint64_t inherited=0,covered=0,remaining=0;std::vector<unsigned char>keep;};
-inline VerifyResult verify_keep(const std::vector<jc::Copy>&copies,const pm::Meta&a,const pm::Meta&b,const pm::Map&abits,const pm::Map&bbits){
-    std::vector<unsigned char>keep(bbits.data,bbits.data+bbits.size);uint64_t inherited=0,covered=0;
+inline VerifyResult verify_keep(const std::vector<jc::Copy>&copies,const pm::Meta&a,const pm::Meta&b,const pm::Map&abits,const pm::Map&bbits,unsigned threads=1){
+    std::vector<unsigned char>keep(bbits.data,bbits.data+bbits.size);std::atomic<uint64_t> inherited{0},covered{0};
     auto bits=[](const pm::Map&file,uint64_t at,unsigned count){uint64_t result=0;unsigned shift=at&7;uint64_t byte=at/8;unsigned need=(shift+count+7)/8;
         if(!count||count>64||byte>=file.size||need>file.size-byte)pm::fail("joint bitmap window out of bounds");
         for(unsigned i=0;i<std::min<unsigned>(need,8);++i)result|=uint64_t(file.data[byte+i])<<(8*i);
         result>>=shift;if(need==9)result|=uint64_t(file.data[byte+8])<<(64-shift);
         if(count<64)result&=(1ull<<count)-1;return result;};
-    auto clear=[&](uint64_t at,uint64_t count){while(count&&(at&7)){keep[at/8]&=~(1u<<(at&7));++at;--count;}auto bytes=count/8;memset(keep.data()+at/8,0,bytes);at+=bytes*8;count-=bytes*8;if(count)keep[at/8]&=~((1u<<count)-1);};
-    for(auto&r:copies){covered+=r.n;for(unsigned reverse=0;reverse<2;++reverse){auto&ac=a.contigs[r.a];auto&bc=b.contigs[r.b];uint64_t count=r.n-39;
-        uint64_t ap=(reverse^r.reverse)?ac.reverse+ac.length-r.x-r.n:ac.forward+r.x;
-        uint64_t bp=reverse?bc.reverse+bc.length-r.y-r.n:bc.forward+r.y;
-        for(uint64_t offset=0;offset<count;offset+=64){unsigned n=std::min<uint64_t>(64,count-offset);auto av=bits(abits,ap+offset,n),bv=bits(bbits,bp+offset,n);
-            if(av!=bv)pm::fail("native sampler is not invariant within a complete copied 40-mer: target contig "+std::to_string(r.b)+" oriented bit "+std::to_string(bp+offset));
-            inherited+=__builtin_popcountll(bv);
-        }clear(bp,count);
-    }}
+    // Copies are disjoint on the target, so the bytes wholly inside one copy's bit range belong to it alone; the partial
+    // bytes at its two ends may be shared with a neighbouring copy handled by another thread and are cleared atomically.
+    auto clear_bits=[&](unsigned char*byte,unsigned char mask){__atomic_fetch_and(byte,static_cast<unsigned char>(~mask),__ATOMIC_RELAXED);};
+    auto clear=[&](uint64_t at,uint64_t count){while(count&&(at&7)){clear_bits(&keep[at/8],1u<<(at&7));++at;--count;}auto bytes=count/8;memset(keep.data()+at/8,0,bytes);at+=bytes*8;count-=bytes*8;if(count)clear_bits(&keep[at/8],(1u<<count)-1);};
+    constexpr size_t CHUNK=1<<13;const size_t chunks=(copies.size()+CHUNK-1)/CHUNK;
+    std::atomic<size_t> next{0};std::mutex failure_lock;std::exception_ptr failure;
+    auto work=[&]{try{
+        for(size_t c;(c=next.fetch_add(1))<chunks;){uint64_t inh=0,cov=0;
+            for(size_t i=c*CHUNK;i<std::min(copies.size(),(c+1)*CHUNK);++i){auto&r=copies[i];cov+=r.n;for(unsigned reverse=0;reverse<2;++reverse){auto&ac=a.contigs[r.a];auto&bc=b.contigs[r.b];uint64_t count=r.n-39;
+                uint64_t ap=(reverse^r.reverse)?ac.reverse+ac.length-r.x-r.n:ac.forward+r.x;
+                uint64_t bp=reverse?bc.reverse+bc.length-r.y-r.n:bc.forward+r.y;
+                for(uint64_t offset=0;offset<count;offset+=64){unsigned n=std::min<uint64_t>(64,count-offset);auto av=bits(abits,ap+offset,n),bv=bits(bbits,bp+offset,n);
+                    if(av!=bv)pm::fail("native sampler is not invariant within a complete copied 40-mer: target contig "+std::to_string(r.b)+" oriented bit "+std::to_string(bp+offset));
+                    inh+=__builtin_popcountll(bv);
+                }clear(bp,count);
+            }}
+            inherited+=inh;covered+=cov;}
+    }catch(...){std::lock_guard<std::mutex> g(failure_lock);if(!failure)failure=std::current_exception();next=chunks;}};
+    std::vector<std::thread> pool;for(unsigned t=1;t<std::max(1u,threads);++t)pool.emplace_back(work);work();for(auto&t:pool)t.join();
+    if(failure)std::rethrow_exception(failure);
     uint64_t remaining=0;for(auto v:keep)remaining+=__builtin_popcount(unsigned(v));if(remaining+inherited!=b.marks)pm::fail("joint inherited/residual mark accounting mismatch");
     VerifyResult r;r.inherited=inherited;r.covered=covered;r.remaining=remaining;r.keep=std::move(keep);return r;
 }

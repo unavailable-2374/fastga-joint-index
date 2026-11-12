@@ -1,4 +1,4 @@
-# Joint FastGA indexes, version 4
+# Joint FastGA indexes, version 4 (physical position archives: container version 5)
 
 This is an opt-in, lossless, two-genome relative occurrence index. It is built
 from FASTA without a native GIX intermediate. Native sampling, multiplicity,
@@ -50,31 +50,62 @@ native or PFP sorting backend (the PFP backend parses the same text for its own 
 ## Physical files
 
 All integers are little endian; unsigned varints use seven payload bits per
-byte, with overflow and truncation rejection. Blocks are zlib-format streams
-written by libdeflate at level 1 (any zlib reader decodes them).
+byte, with overflow and truncation rejection. Order and metadata blocks are
+zlib-format streams written by libdeflate at level 1 (any zlib reader decodes
+them); position blocks are bit-packed as described below.
 
-* `reference.sgr` / `residual.sgr`: `SXGTEMP4`, container version 4, reuse the
-  existing 128-byte archive header, 4096-row blocks, adaptive position codecs
-  and 24-byte block directory. IDs, mask and LCP fields are zero in new private
-  frames: keys and LCPs are reconstructed, and mask intervals are stored once.
+* `reference.sgr` / `residual.sgr`: `SXGTEMP4` magic, container version 5, reuse the
+  existing 128-byte archive header, 4096-row blocks and 24-byte block directory.
+  IDs, mask and LCP fields are zero in new private frames: keys and LCPs are
+  reconstructed, and mask intervals are stored once. Block codec 3 (the only codec
+  the builders write) is the packed-coordinate codec: one fixed-width value per
+  row, `strand * D + start[rank] + position`, where the contigs of a strand are laid
+  out in rank order with `length + 1` values each (a reverse row's position is its
+  end) and `D` is their total, so the width is `ceil(log2(2D))` bits (33 for a
+  3 Gbp genome; at most 57). Rows are little-endian bit strings with row `i` at bit
+  `i*width`; a block holds exactly `ceil(rows*width/8)` bytes, stored without
+  compression (directory `packed` equals `raw`) and covered by the directory CRC32.
   Compact metadata is `k:uint32`, `post:uint32`, `cont:uint32`,
-  `ncontig:uint32`, `rows:uint64`, then `ncontig` permutation entries (`uint32`).
+  `ncontig:uint32`, `rows:uint64`, `ncontig` permutation entries (`uint32`), then
+  `ncontig` contig lengths by rank as unsigned varints, which fix `D` and the width.
+  Version 4 archives (codecs 0-2, zlib blocks, no length table) are still read; a
+  writer falls back to version 4 only if the width would exceed 57 bits.
   Physical archives do not contain redundant 2^24-entry prefix indexes.
-* `joint.copies`: `SXGCOPY4`, record count, raw size and packed size (`uint64`),
-  raw CRC32 (`uint32`), then compressed records. Each 33-byte record contains
-  reference/target contigs (`uint32` each), reference/target starts and length
-  (`uint64` each), and reversal (`uint8`). Records are in target coordinate order.
+* `joint.copies`: `SXGCOPY5`, record count, decoded size and packed size (`uint64`),
+  CRC32 of the concatenated decoded streams (`uint32`), then six streams, each stored
+  as raw size and packed size (`uint64` each) and its own zlib block: reference
+  contig (zigzag varint delta), target contig (varint delta), reversal (one byte per
+  record), target gap (start minus the previous record's end when the target contig
+  is unchanged, else the start), reference start minus the previous record's
+  reference end plus the gap (zigzag varint, arithmetic modulo 2^64) and length
+  (varint). Records are in target coordinate order. Loading validates the same
+  bounds and non-overlap as before.
 * `reference.meta` / `target.meta`: pinned `SXGPFP1` metadata containing contig
   lengths, orientation offsets, permutations, original occurrence counts and
   the applied, unioned mask intervals. No parse or dictionary is required at runtime.
-* `joint.order`: `SXGORDR4`, generic archive container version 1. Each physical
+* `joint.order`: `SXGORDR5`, generic archive container version 1. Each physical
   row selects a reference occurrence or target residual. Reference rows carry
   target occurrence weights; residual rows have target weight one.
-  Header field 76 is weight codec 1. A block contains an origin bitplane and
-  nonzero-weight bitplane (ceil(rows/8) bytes each), a varint exception count,
-  then delta-row/weight varint pairs for weights greater than one. Padding bits
-  must be zero; exceptions cannot address residuals, repeat rows, or overflow.
-  The reader also supports the initial experimental varint weight codec 0.
+  Header field 76 is block codec 2 (codecs 1, bitplanes without an LCP plane, and
+  0, the initial experimental varint weight codec, remain parseable). A block
+  contains an origin bitplane and nonzero-weight bitplane (ceil(rows/8) bytes
+  each), a varint exception count, delta-row/weight varint pairs for weights
+  greater than one, then the entropy-coded LCP plane (30 four-bit code lengths,
+  then canonical prefix codes of at most 10 bits, least significant bit first;
+  see `joint_union_core.hpp`). Padding bits must be zero;
+  exceptions cannot address residuals, repeat rows, or overflow.
+  The LCP code of a physical row is 0 when it starts a new 12-base panel (its
+  key shares fewer than 12 bases with the previous physical row, or it is the
+  first row), otherwise the number of shared bases of the 40-base keys, 12..40
+  (40 = equal key). The code is computed between consecutive rows of the union
+  of reference and residual rows in the order stored here, so an equal-key
+  reference row and target row also have code 40. LCPs inside a view are running
+  minima of these codes. The seed merge (`FastGA-shared`, both pairing directions
+  of one bundle) uses only these codes, the weights and the physical positions:
+  for every query group it takes the longest prefix shared with any occurrence
+  of the other view (one of its two neighbours in key order) and the run of
+  the other view's rows sharing that prefix, and applies the frequency cutoff to
+  that run, exactly the rule of FastGA's cache merge. No key bytes are rebuilt.
 * Order metadata contains a varint directory count and 32-byte entries holding
   cumulative reference rows, residual rows, A occurrences and B occurrences
   before each block, including a final sentinel. Five trailing CRC32 values bind

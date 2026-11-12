@@ -5,9 +5,13 @@
 // sampler/keep verification (joint_stages.hpp) finish the job. Output files equal joint-copy's.
 #include "joint_stages.hpp"
 #include <iostream>
+#include "stdout_guard.hpp"
 #include <fstream>
 #include <chrono>
 #include <sys/resource.h>
+#ifdef __SSE2__
+#include <emmintrin.h>
+#endif
 using namespace js;
 namespace {
 constexpr unsigned BB=20,TAGB=24;constexpr uint64_t POSMASK=(1ull<<40)-1;
@@ -38,6 +42,37 @@ inline uint64_t fwd_match(const unsigned char*p,const unsigned char*q,uint64_t l
 inline uint64_t bwd_match(const unsigned char*p,const unsigned char*q,uint64_t lim){uint64_t i=0; // compares p[-1-i] with q[-1-i]
     for(;i+8<=lim;i+=8){uint64_t a,b;memcpy(&a,p-i-8,8);memcpy(&b,q-i-8,8);if(a!=b)return i+(__builtin_clzll(a^b)>>3);}
     for(;i<lim&&p[-1-i]==q[-1-i];++i);return i;}
+// Flank signature of a minimizer occurrence at p (k-mer start): the 16 text bytes before it and the 16 after the k-mer, each reduced
+// to its bits 1 and 2 (A,C,G,T = 0,1,3,2: four distinct values) and stored as two 16-bit planes. Low word: left flank, bit j is the
+// byte at p-16+j (nearest byte in bit 15); high word: right flank, bit j is the byte at p+K+j (nearest in bit 0). Bytes outside the
+// text read as 0. Two different bytes can map to one value (only for separators), which can lengthen a computed match but never
+// shorten it, so the filter below is conservative.
+inline uint32_t plane_pair(const unsigned char*q){
+#ifdef __SSE2__
+    __m128i x=_mm_loadu_si128(reinterpret_cast<const __m128i*>(q));
+    uint32_t b1=uint32_t(_mm_movemask_epi8(_mm_slli_epi16(x,6))),b2=uint32_t(_mm_movemask_epi8(_mm_slli_epi16(x,5)));
+    return (b1&0xffff)|(b2<<16);
+#else
+    uint32_t b1=0,b2=0;for(unsigned i=0;i<16;++i){b1|=uint32_t((q[i]>>1)&1)<<i;b2|=uint32_t((q[i]>>2)&1)<<i;}return b1|(b2<<16);
+#endif
+}
+inline uint64_t flank_of(const unsigned char*t,uint64_t n,uint64_t p,unsigned K){
+    uint32_t l,r;
+    if(p>=16)l=plane_pair(t+p-16);
+    else{unsigned char tmp[16]={};for(unsigned i=0;i<16;++i)if(p+i>=16)tmp[i]=t[p+i-16];l=plane_pair(tmp);}
+    if(p+K+16<=n)r=plane_pair(t+p+K);
+    else{unsigned char tmp[16]={};for(unsigned j=0;j<16;++j)if(p+K+j<n)tmp[j]=t[p+K+j];r=plane_pair(tmp);}
+    return uint64_t(l)|(uint64_t(r)<<32);
+}
+// A hit can reach 40 matching bases (left+right>=40 with right=K+b, left=a) only if a+b>=40-K. Both flanks are compared up to 16
+// bases: if neither saturates the matched lengths are exact and the sum decides; if one saturates the hit is extended as before.
+inline bool flank_pass(uint64_t q,uint64_t e,unsigned need){
+    uint32_t dl=uint32_t(q)^uint32_t(e),dr=uint32_t(q>>32)^uint32_t(e>>32);
+    uint32_t ml=((dl|(dl>>16))&0xffffu)<<16,mr=(dr|(dr>>16))&0xffffu; // mismatch masks; ml shifted to the top for clz
+    unsigned a=ml?__builtin_clz(ml):16,b=mr?__builtin_ctz(mr):16;
+    return a==16||b==16||a+b>=need;
+}
+struct Entry{uint64_t key,flank;};
 struct Cand{uint64_t y,x,n;};
 inline bool cand_less(const Cand&p,const Cand&q){return p.y!=q.y?p.y<q.y:p.n!=q.n?p.n>q.n:p.x<q.x;}
 inline bool cand_eq(const Cand&p,const Cand&q){return p.y==q.y&&p.x==q.x&&p.n==q.n;}
@@ -46,6 +81,7 @@ template<class F> void parallel(size_t count,unsigned threads,F&&f){std::atomic<
     std::vector<std::thread>pool;for(unsigned i=1;i<threads;++i)pool.emplace_back(work);work();for(auto&th:pool)th.join();}
 }
 int main(int argc,char**argv){try{
+    sjio::guard_stdout("joint-copy");
     const char*usage="joint-copy TEXT A_PREFIX B_PREFIX OUTPUT_COPIES OUTPUT_KEEP THREADS [--max-occurrences N] [--k N] [--w N]\n"
         "Minimizer-anchor copy finder over the oriented marked texts (A both strands, B forward). Seeds of k-mers with at most\n"
         "N reference occurrences (default 1000) are extended to maximal exact runs; seeds above the cap are left to the gap\n"
@@ -75,12 +111,13 @@ int main(int argc,char**argv){try{
         scan(tx,N,c*chunk,std::min<uint64_t>(N,(c+1)*chunk),K,W,dq,[&](uint64_t,uint64_t h){counts[h>>(64-BB)].fetch_add(1,std::memory_order_relaxed);++local;});indexed+=local;});
     std::vector<uint64_t>off((size_t(1)<<BB)+1);uint64_t total=0;for(size_t i=0;i<(size_t(1)<<BB);++i){off[i]=total;total+=counts[i].load();}off[size_t(1)<<BB]=total;
     if(total!=indexed.load())pm::fail("anchor index count mismatch");
-    std::vector<uint64_t>entries(std::max<uint64_t>(1,total));
+    // Uninitialised: every slot is written exactly once by the fill pass (the counts add up to total), first-touched in parallel.
+    std::unique_ptr<Entry[]>entries_mem(new Entry[std::max<uint64_t>(1,total)]);Entry*const entries=entries_mem.get();
     for(size_t i=0;i<(size_t(1)<<BB);++i)counts[i].store(0);
     parallel(chunks,threads,[&](size_t c){std::vector<std::pair<uint64_t,uint64_t>>dq;
         scan(tx,N,c*chunk,std::min<uint64_t>(N,(c+1)*chunk),K,W,dq,[&](uint64_t p,uint64_t h){size_t bk=h>>(64-BB);uint64_t tag=(h>>(64-BB-TAGB))&((1ull<<TAGB)-1);
-            entries[off[bk]+counts[bk].fetch_add(1,std::memory_order_relaxed)]=(tag<<40)|p;});});
-    parallel(size_t(1)<<BB,threads,[&](size_t bk){std::sort(entries.begin()+off[bk],entries.begin()+off[bk+1]);});
+            entries[off[bk]+counts[bk].fetch_add(1,std::memory_order_relaxed)]=Entry{(tag<<40)|p,flank_of(tx,N,p,K)};});});
+    parallel(size_t(1)<<BB,threads,[&](size_t bk){std::sort(entries+off[bk],entries+off[bk+1],[](const Entry&u,const Entry&v){return u.key<v.key;});});
     counts=std::vector<std::atomic<uint32_t>>();
     const double t2=now();
     // ---- anchors of every target forward contig ----
@@ -91,37 +128,65 @@ int main(int argc,char**argv){try{
     for(size_t k=asegs;k<segments.size();++k){auto&t=segments[k];if(t.reverse||whole[t.c])continue;tsegs.push_back(k);
         for(uint64_t s=t.begin;s<t.end;s+=WIN)wins.push_back({k,s,std::min<uint64_t>(t.end,s+WIN)});}
     std::vector<std::vector<Cand>>found(wins.size());
-    std::atomic<uint64_t>queries{0},skipped{0},hits{0},extended{0};
+    std::atomic<uint64_t>queries{0},skipped{0},hits{0},extended{0},flank_passed{0};
     constexpr size_t CACHE=1<<16;
+    // segblk[b] = number of reference segments starting at or before the first position of block b (x lies below a.n).
+    constexpr unsigned SEGSHIFT=16;
+    std::vector<uint32_t>segblk((a.n>>SEGSHIFT)+2);
+    for(size_t b=0;b<segblk.size();++b){uint64_t pos=uint64_t(b)<<SEGSHIFT;
+        segblk[b]=std::upper_bound(segments.begin(),segments.begin()+asegs,pos,[](uint64_t v,const Segment&s){return v<s.begin;})-segments.begin();}
     parallel(wins.size(),threads,[&](size_t wi){
         auto&w=wins[wi];auto&t=segments[w.seg];auto&out=found[wi];
         std::vector<std::pair<uint64_t,uint64_t>>dq;
-        std::vector<int64_t>cdiag(CACHE,INT64_MIN);std::vector<uint64_t>cend(CACHE,0);
-        uint64_t q=0,sk=0,ht=0,ex=0;
+        std::vector<int64_t>cdiag(CACHE,INT64_MIN);std::vector<uint64_t>cend(CACHE,0);std::vector<uint64_t>pys,pme;
+        uint64_t q=0,sk=0,ht=0,ex=0,fp=0;std::vector<uint64_t>pass;
         scan(tx,text.size,w.s,w.e,K,W,dq,[&](uint64_t y,uint64_t h){
             ++q;size_t bk=h>>(64-BB);uint64_t tag=(h>>(64-BB-TAGB))&((1ull<<TAGB)-1);
-            auto first=entries.begin()+off[bk],last=entries.begin()+off[bk+1];
-            auto lo=std::lower_bound(first,last,tag<<40);auto hi=std::upper_bound(lo,last,(tag<<40)|POSMASK);
+            auto first=entries+off[bk],last=entries+off[bk+1];
+            auto lo=std::lower_bound(first,last,tag<<40,[](const Entry&u,uint64_t v){return u.key<v;});auto hi=std::upper_bound(lo,last,(tag<<40)|POSMASK,[](uint64_t v,const Entry&u){return v<u.key;});
             uint64_t c=hi-lo;if(!c)return;
-            auto try_hit=[&](uint64_t x)->bool{++ht;
+            auto try_hit=[&](uint64_t x)->bool{
                 int64_t diag=int64_t(x)-int64_t(y);size_t slot=(mix(uint64_t(diag))>>40)&(CACHE-1);
                 if(cdiag[slot]==diag&&y<cend[slot])return false;
-                auto sit=std::upper_bound(segments.begin(),segments.begin()+asegs,x,[](uint64_t v,const Segment&s){return v<s.begin;});
-                if(sit==segments.begin())return false;--sit;auto&s=*sit;if(x>=s.end||x+K>s.end)return false;
+                // Reference segment holding x: same answer as upper_bound over the segment starts, from a block table.
+                size_t j=segblk[x>>SEGSHIFT];
+                while(j<asegs&&segments[j].begin<=x)++j;
+                if(!j)return false;auto&s=segments[j-1];if(x>=s.end||x+K>s.end)return false;
                 ++ex;
                 uint64_t right=fwd_match(tx+y,tx+x,std::min<uint64_t>(t.end-y,s.end-x));
                 if(right<K)return false; // hash/tag collision
                 uint64_t left=bwd_match(tx+y,tx+x,std::min<uint64_t>(y-t.begin,x-s.begin));
                 cdiag[slot]=diag;cend[slot]=y+right;
-                if(left+right>=40){out.push_back({y-left,x-left,left+right});return true;}
+                if(left+right>=40){
+                    // Skip a candidate the window's dominance filter below would drop anyway: an already pushed candidate from a
+                    // hit at y' < start begins at or before y' (so strictly before start) and reaches at least as far. pys is
+                    // non-decreasing (hits arrive in ascending y) and pme is the running maximum of the pushed ends.
+                    uint64_t start=y-left,end=y+right;
+                    size_t k=std::lower_bound(pys.begin(),pys.end(),start)-pys.begin();
+                    if(k&&pme[k-1]>=end)return true;
+                    out.push_back({start,x-left,left+right});pys.push_back(y);pme.push_back(pme.empty()?end:std::max(pme.back(),end));return true;}
                 return false;};
             if(c>maxocc){++sk;return;} // repeat seed: left to the gap re-anchoring
-            for(auto it=lo;it!=hi;++it)try_hit(*it&POSMASK);
+            // Hits of one query are independent random reads of the reference text (the extension is memory-latency bound):
+            // prefetch the text around the hit PF positions ahead. Pure scheduling; the visited hits and their order are unchanged.
+            ht+=c;
+            // Flank filter: the stored flanks of a hit and the query's decide, without touching the reference text, whether the
+            // maximal exact run through the hit can reach 40 bases; hits that cannot are dropped (they would be rejected after extension).
+            const uint64_t qf=flank_of(tx,text.size,y,K);
+            if(pass.size()<c)pass.resize(c);
+            size_t np_=0;
+            for(auto it=lo;it!=hi;++it){pass[np_]=it->key&POSMASK;np_+=flank_pass(qf,it->flank,40-K);} // branch-free append
+            fp+=np_;
+            constexpr ptrdiff_t PF=12;const ptrdiff_t np=np_;
+            for(ptrdiff_t i=0;i<np&&i<PF;++i){__builtin_prefetch(tx+pass[i]-8);__builtin_prefetch(tx+pass[i]+24);}
+            for(ptrdiff_t i=0;i<np;++i){
+                if(np-i>PF){__builtin_prefetch(tx+pass[i+PF]-8);__builtin_prefetch(tx+pass[i+PF]+24);}
+                try_hit(pass[i]);}
         });
         std::sort(out.begin(),out.end(),cand_less);out.erase(std::unique(out.begin(),out.end(),cand_eq),out.end());
         { // a run contained in an earlier-starting run of the same window cannot extend any chain
             size_t keepn=0;uint64_t reach=0;for(size_t i=0;i<out.size();++i){uint64_t e=out[i].y+out[i].n;if(e>reach){reach=e;out[keepn++]=out[i];}}out.resize(keepn);out.shrink_to_fit();}
-        queries+=q;skipped+=sk;hits+=ht;extended+=ex;});
+        queries+=q;skipped+=sk;hits+=ht;extended+=ex;flank_passed+=fp;});
     const double t3=now();
     // ---- deterministic disjoint selection per target contig ----
     std::vector<std::vector<jc::Copy>>made(tsegs.size());std::vector<uint64_t>ncand(tsegs.size(),0);
@@ -165,21 +230,23 @@ int main(int argc,char**argv){try{
      });}
     uint64_t ncands=0;for(auto v:ncand)ncands+=v;
     for(auto&v:made)for(auto&r:v)copies.push_back(r);
-    {std::vector<std::vector<Cand>>().swap(found);std::vector<uint64_t>().swap(entries);}
+    {std::vector<std::vector<Cand>>().swap(found);entries_mem.reset();}
     std::sort(copies.begin(),copies.end(),[](auto&x,auto&y){return x.b==y.b?x.y<y.y:x.b<y.b;});
     const uint64_t anchor_copies=copies.size();
     const double t4=now();
     auto rs=reanchor(jt,segments,a,b,copies,threads);
     const double t5=now();
-    auto vr=verify_keep(copies,a,b,abits,bbits);
+    auto vr=verify_keep(copies,a,b,abits,bbits,threads);
     const double t6=now();
     jc::save(argv[4],copies);std::ofstream out(argv[5],std::ios::binary);out.write((char*)vr.keep.data(),vr.keep.size());out.close();if(!out)pm::fail("write joint residual bitmap");
     struct rusage ru;getrusage(RUSAGE_SELF,&ru);
     std::cout<<"{\"status\":\"PASS\",\"finder\":\"minimizer-anchor\",\"k\":"<<K<<",\"w\":"<<W<<",\"max_occurrences\":"<<maxocc
-        <<",\"indexed_minimizers\":"<<total<<",\"target_queries\":"<<queries.load()<<",\"queries_over_max_occurrence\":"<<skipped.load()<<",\"hits\":"<<hits.load()<<",\"extensions\":"<<extended.load()
+        <<",\"indexed_minimizers\":"<<total<<",\"target_queries\":"<<queries.load()<<",\"queries_over_max_occurrence\":"<<skipped.load()<<",\"hits\":"<<hits.load()<<",\"flank_passed_hits\":"<<flank_passed.load()<<",\"extensions\":"<<extended.load()
         <<",\"candidates\":"<<ncands<<",\"whole_contig_copies\":"<<whole_copies<<",\"copy_blocks\":"<<copies.size()<<",\"anchor_copy_blocks\":"<<anchor_copies<<",\"reanchored_copy_blocks\":"<<rs.gap_copies
         <<",\"reanchor_rounds\":"<<rs.gap_rounds<<",\"reanchor_round_copies\":["<<[&]{std::string o;for(size_t i=0;i<rs.round_copies.size();++i)o+=(i?",":"")+std::to_string(rs.round_copies[i]);return o;}()<<"]"
         <<",\"copied_bases\":"<<vr.covered<<",\"inherited_occurrences\":"<<vr.inherited<<",\"residual_occurrences\":"<<vr.remaining<<",\"target_occurrences\":"<<b.marks
         <<",\"seconds\":{\"setup\":"<<t1-t0<<",\"index\":"<<t2-t1<<",\"anchors\":"<<t3-t2<<",\"select\":"<<t4-t3<<",\"reanchor\":"<<t5-t4<<",\"verify\":"<<t6-t5<<",\"total\":"<<t6-t0<<"}"
         <<",\"peak_rss_kib\":"<<ru.ru_maxrss<<",\"user_seconds\":"<<ru.ru_utime.tv_sec+ru.ru_utime.tv_usec*1e-6<<",\"sys_seconds\":"<<ru.ru_stime.tv_sec+ru.ru_stime.tv_usec*1e-6<<"}\n";
+    // Every output file is closed and the report is complete: skip the teardown of the 10+ GB of tables (seconds of munmap/free).
+    sjio::check_stdout_at_exit();_exit(0);
 }catch(const std::exception&e){std::cerr<<"anchor-copy failed: "<<e.what()<<'\n';return 1;}}

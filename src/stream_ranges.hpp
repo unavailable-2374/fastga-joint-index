@@ -15,13 +15,26 @@ void ranges(const std::string &value){
     stream_ranges=n;
 }
 
+// 10-byte keys (forty bases, high pair first). Equivalent to memcmp / sgu::lcp_code on two keys, from two word compares.
+inline uint64_t key_head(const unsigned char*p){uint64_t v;memcpy(&v,p,8);return __builtin_bswap64(v);}
+inline unsigned key_tail(const unsigned char*p){return (unsigned(p[8])<<8)|p[9];}
+inline bool key_less(const unsigned char*a,const unsigned char*b){
+    uint64_t x=key_head(a),y=key_head(b);if(x!=y)return x<y;return key_tail(a)<key_tail(b);
+}
+// LCP code of the key `row` after `last` (0 below 12 shared bases, else the shared bases, 40 = equal key).
+inline unsigned char key_lcp(const unsigned char*last,const unsigned char*row){
+    uint64_t x=key_head(last)^key_head(row);unsigned bases;
+    if(x)bases=__builtin_clzll(x)/2;
+    else{unsigned t=key_tail(last)^key_tail(row);if(!t)return 40;bases=32+(__builtin_clz(t)-16)/2;}
+    return bases<12?0:static_cast<unsigned char>(bases);
+}
 // The rows of one sample inside one range, as the stream carries them (key then payload).
 struct RangeRows {
     Bytes data;uint64_t n=0;
     std::vector<uint32_t> ids; // dictionary id of each row relative to id_base (only when rows store ids)
     uint64_t id_base=0;
 };
-struct RangeOrder {Bytes origin;std::vector<uint32_t> weight;}; // joint.order rows of one range
+struct RangeOrder {Bytes origin,lcp;std::vector<uint32_t> weight;}; // joint.order rows of one range
 
 // Reads one producer stream on its own thread and cuts it at range boundaries.
 // The thread only reads, checks the key order and copies; the bounded queue
@@ -36,6 +49,7 @@ private:
     std::mutex m;std::condition_variable cv;std::deque<Item> queue;bool done=false,stop=false;std::exception_ptr error;std::thread thread;
     void exact(void *dst,size_t n){
         auto *p=static_cast<unsigned char*>(dst);
+        GateRelease idle(true); // blocked on the pipe: no token until the bytes are here
         while(n){
             if(stop)throw Stopped();
             pollfd pf{fd,POLLIN,0};int r=poll(&pf,1,100);
@@ -51,6 +65,7 @@ private:
     void publish(std::shared_ptr<RangeRows> rows,uint32_t range){
         if(!rows)return;
         rows->n=rows->data.size()/(kbytes+csize);
+        GateRelease idle(true);
         std::unique_lock<std::mutex> lock(m);
         cv.wait(lock,[&]{return stop||queue.size()<capacity;});
         if(stop)throw Stopped();
@@ -58,6 +73,7 @@ private:
     }
     void run(){
         try{
+            GateHold token(true); // a reader computes only between pipe reads
             const size_t width=kbytes+csize;Bytes batch;unsigned char previous[16]={};bool have=false;
             std::shared_ptr<RangeRows> current;uint32_t current_range=UINT32_MAX;
             for(;;){
@@ -65,6 +81,7 @@ private:
                 if(left==UINT64_MAX){
                     if(number(8)!=total)fail("direct stream count mismatch");
                     unsigned char extra;
+                    GateRelease idle(true);
                     for(;;){ // end of file is required after the count
                         if(stop)throw Stopped();
                         pollfd pf{fd,POLLIN,0};int r=poll(&pf,1,100);
@@ -83,7 +100,7 @@ private:
                     size_t begin=0;
                     for(size_t i=0;i<k;++i){
                         const unsigned char *row=batch.data()+i*width,*before=i?row-width:(have?previous:nullptr);
-                        if(before&&memcmp(row,before,kbytes)<0)fail("unsorted direct seed keys");
+                        if(before&&key_less(row,before))fail("unsorted direct seed keys");
                         uint32_t r=table[(unsigned(row[0])<<8)|row[1]];
                         if(r!=current_range){
                             if(current&&i>begin)current->data.insert(current->data.end(),batch.data()+begin*width,batch.data()+i*width);
@@ -117,7 +134,7 @@ public:
     RangeReader(const RangeReader&)=delete;
     ~RangeReader(){
         {std::lock_guard<std::mutex> lock(m);stop=true;}cv.notify_all();
-        if(thread.joinable())thread.join();
+        if(thread.joinable()){GateRelease idle(true);thread.join();}
         if(fd>=0)close(fd);
     }
     void start(){thread=std::thread([this]{run();});}
@@ -125,8 +142,14 @@ public:
     const Item *front(){
         std::unique_lock<std::mutex> lock(m);
         while(queue.empty()&&!done){
-            lock.unlock();bool ran=pool_size()&&encode_pool().run_one();lock.lock();
-            if(!ran&&queue.empty()&&!done)cv.wait_for(lock,std::chrono::microseconds(200));
+            lock.unlock();bool ran=pool_size()&&encode_pool().run_one();
+            if(!ran){ // no job to help with: wait for the reader without a token (and without a thread-pool stall)
+                GateRelease idle(true);
+                lock.lock();
+                if(queue.empty()&&!done)cv.wait_for(lock,std::chrono::microseconds(200));
+                lock.unlock();
+            }
+            lock.lock();
         }
         if(error)std::rethrow_exception(error);
         return queue.empty()?nullptr:&queue.front();
@@ -160,7 +183,7 @@ struct RangeEnv {
     unsigned samples,kbytes,post,cont;bool joint,ids; // post/cont: sample 0 (the reference); each sample has its own payload width
     std::vector<unsigned> csize;
     std::vector<int64*> prefix; // per sample: counts per 3-byte prefix; ranges touch disjoint prefixes
-    int64 *weighted=nullptr;const jc::Intervals *tree=nullptr;const std::vector<int> *perm=nullptr;
+    int64 *weighted=nullptr;const jc::Stab *stab=nullptr;const std::vector<int> *perm=nullptr;
 };
 struct RangeOut {
     std::vector<std::shared_ptr<RangeRows>> rows;
@@ -178,14 +201,16 @@ RangeOut run_range(const RangeEnv &e,std::vector<std::shared_ptr<RangeRows>> row
     std::vector<uint64_t> at(e.samples,0);
     Bytes keys;const unsigned char *last=nullptr;uint64_t distinct=0;
     if(e.ids)for(auto &r:o.rows)r->ids.resize(r->n);
-    if(e.joint){o.order=std::make_shared<RangeOrder>();o.order->origin.resize(total);o.order->weight.resize(total);}
-    std::vector<size_t> matches;uint64_t ar=reference_before,br=target_before,sum=0;
+    if(e.joint){o.order=std::make_shared<RangeOrder>();o.order->origin.resize(total);o.order->lcp.resize(total);o.order->weight.resize(total);}
+    uint64_t ar=reference_before,br=target_before,sum=0;
     for(uint64_t i=0;i<total;++i){
         unsigned best=e.samples;
         for(unsigned s=0;s<e.samples;++s)
-            if(at[s]<o.rows[s]->n&&(best==e.samples||memcmp(o.rows[s]->data.data()+at[s]*(e.kbytes+e.csize[s]),o.rows[best]->data.data()+at[best]*(e.kbytes+e.csize[best]),e.kbytes)<0))best=s;
+            if(at[s]<o.rows[s]->n&&(best==e.samples||key_less(o.rows[s]->data.data()+at[s]*(e.kbytes+e.csize[s]),o.rows[best]->data.data()+at[best]*(e.kbytes+e.csize[best]))))best=s;
         auto &rows_s=*o.rows[best];const unsigned char *row=rows_s.data.data()+at[best]*(e.kbytes+e.csize[best]);
-        if(!last||memcmp(last,row,e.kbytes)){keys.insert(keys.end(),row,row+e.kbytes);last=row;++distinct;}
+        const unsigned char code=!last?0:key_lcp(last,row); // the first row of a range starts a panel
+        if(e.joint)o.order->lcp[i]=code;
+        if(!last||code!=40){keys.insert(keys.end(),row,row+e.kbytes);last=row;++distinct;}
         if(e.ids){if(distinct>UINT32_MAX)fail("range holds more than 2^32 distinct keys; use more --ranges");rows_s.ids[at[best]]=uint32_t(distinct-1);}
         uint32_t prefix=(uint32_t(row[0])<<16)|(uint32_t(row[1])<<8)|row[2];
         ++e.prefix[best][prefix];
@@ -197,7 +222,7 @@ RangeOut run_range(const RangeEnv &e,std::vector<std::shared_ptr<RangeRows>> row
                 uint64_t pos=sxgc_positions::number(payload+2,e.post),rank=sxgc_positions::number(payload+2+e.post,e.cont);
                 bool reverse=rank>>(8*e.cont-1);rank&=~(uint64_t(1)<<(8*e.cont-1));
                 if(rank>=e.perm->size()||(reverse&&pos<40))fail("invalid joint source coordinate");
-                e.tree->get((*e.perm)[rank],reverse?pos-40:pos,matches);weight=matches.size();
+                {auto*g=e.stab->segment((*e.perm)[rank],reverse?pos-40:pos);weight=g?g->n:0;}
                 if(weight>UINT32_MAX)fail("joint weight exceeds 32 bits");
                 ++ar;
             }else ++br;
@@ -217,6 +242,7 @@ void build_streams_ranged(const fs::path &out,const std::vector<std::string>&arg
     if(fs::exists(out/"sequences.sgd")||fs::exists(out/"READY"))fail("direct output already exists");
     joint_fuse.validate(args.size()/2);
     const bool fused=joint_fuse.enabled();
+    GateHold coordinator(true); // the main thread coordinates: it takes the next free token ahead of ordinary waiters
     if(fused)for(const char*name:{"reference.sgr","residual.sgr","joint.order","joint.copies","joint.names"})
         if(fs::exists(out/name))fail(std::string("direct joint output already exists: ")+name);
     if(ranges<1||ranges>65536)fail("--ranges must be 0 through 65536");
@@ -251,10 +277,10 @@ void build_streams_ranged(const fs::path &out,const std::vector<std::string>&arg
     const bool ids=!joint_templates,keep_keys=dict.materialize;
     RangeEnv env{unsigned(nsamples),ins[0]->kbytes,ins[0]->post,ins[0]->cont,fused,ids,{},{}};
     for(auto &s:samples){env.prefix.push_back(s->prefix.data());env.csize.push_back(s->in.csize);}
-    if(sink){env.weighted=sink->bc.data();env.tree=&sink->tree;env.perm=&sink->perm;}
+    if(sink){env.weighted=sink->bc.data();env.stab=&sink->stab;env.perm=&sink->perm;}
     struct Wait { // jobs hold raw pointers into the objects above: never leave while one runs
         std::deque<std::future<RangeOut>> jobs;
-        ~Wait(){for(auto &f:jobs)if(f.valid())f.wait();}
+        ~Wait(){GateRelease idle(true);for(auto &f:jobs)if(f.valid())f.wait();}
     } running;
 
     // Block cutters: one per sample archive, the dictionary and joint.order.
@@ -264,8 +290,8 @@ void build_streams_ranged(const fs::path &out,const std::vector<std::string>&arg
         auto &dw=*samples[s];
         cut_rows[s].emit=[&dw,kb,cs=size_t(dw.in.csize)](std::vector<Cutter<RangeRows>::Slice> &&slices,uint32_t n,uint64_t first){
             auto source=dw.source;const bool joint=joint_templates;const unsigned post=dw.in.post,cont=dw.in.cont;
-            const uint32_t version=u32(dw.w.h.data()+8);
-            dw.w.submit([slices=std::move(slices),n,first,source,joint,post,cont,version,kb,cs]()->Encoded{
+            const uint32_t version=u32(dw.w.h.data()+8);auto domain=dw.w.domain;
+            dw.w.submit([slices=std::move(slices),n,first,source,joint,post,cont,version,kb,cs,domain]()->Encoded{
                 // Same row bytes as DirectWriter::add: id delta (absolute at a block start), then the payload.
                 Bytes raw,checks;raw.reserve(size_t(n)*(cs+(joint?1:3)));if(source)checks.reserve(size_t(n)*(kb+cs));
                 uint64_t last=0;bool begin=true;
@@ -283,7 +309,7 @@ void build_streams_ranged(const fs::path &out,const std::vector<std::string>&arg
                 }
                 if(source)source->verify_rows(checks,first,n,kb,cs);
                 if(version==1){auto packed=sxgc_positions::compress(raw);auto c=crc(raw);return Encoded{std::move(raw),std::move(packed),c,0,0};}
-                auto p=sxgc_positions::pack(raw,n,post,cont);auto c=crc(p.raw);
+                auto p=sxgc_positions::pack(raw,n,post,cont,domain.get());auto c=crc(p.raw);
                 return Encoded{std::move(p.raw),std::move(p.packed),c,p.codec,p.legacy_bytes};
             },n);
         };
@@ -300,9 +326,9 @@ void build_streams_ranged(const fs::path &out,const std::vector<std::string>&arg
     Cutter<RangeOrder> cut_order;
     if(sink)cut_order.emit=[&order=sink->order](std::vector<Cutter<RangeOrder>::Slice> &&slices,uint32_t n,uint64_t){
         order.submit([slices=std::move(slices),n]()->Encoded{
-            std::vector<unsigned char> origin;std::vector<uint64_t> weight;origin.reserve(n);weight.reserve(n);
-            for(const auto &sl:slices)for(size_t j=sl.begin;j<sl.begin+sl.count;++j){origin.push_back(sl.data->origin[j]);weight.push_back(sl.data->weight[j]);}
-            auto raw=joint_order_raw(origin.data(),weight.data(),n);auto packed=sxgc_positions::compress(raw);auto c=crc(raw);
+            std::vector<unsigned char> origin,lcp;std::vector<uint64_t> weight;origin.reserve(n);lcp.reserve(n);weight.reserve(n);
+            for(const auto &sl:slices)for(size_t j=sl.begin;j<sl.begin+sl.count;++j){origin.push_back(sl.data->origin[j]);lcp.push_back(sl.data->lcp[j]);weight.push_back(sl.data->weight[j]);}
+            auto raw=joint_order_raw(origin.data(),weight.data(),lcp.data(),n);auto packed=sxgc_positions::compress(raw);auto c=crc(raw);
             return Encoded{std::move(raw),std::move(packed),c,0,0};
         },n);
     };

@@ -17,19 +17,19 @@
 
 namespace pm {
 [[noreturn]] inline void fail(const std::string&s){throw std::runtime_error(s);}
-inline void put(FILE*f,uint64_t v,unsigned n){unsigned char b[8];for(unsigned i=0;i<n;++i){b[i]=v&255;v>>=8;}if(fwrite(b,1,n,f)!=n)fail("write PFP metadata");}
+inline void put(FILE*f,uint64_t v,unsigned n){unsigned char b[8];for(unsigned i=0;i<n;++i){b[i]=v&255;v>>=8;}if(fwrite(b,1,n,f)!=n)fail(std::string("write PFP metadata: ")+strerror(errno));}
 inline uint64_t get(FILE*f,unsigned n){unsigned char b[8]={};if(fread(b,1,n,f)!=n)fail("truncated PFP metadata");uint64_t v=0;for(int i=n-1;i>=0;--i)v=v*256+b[i];return v;}
 struct Contig {uint64_t forward=UINT64_MAX,reverse=UINT64_MAX,length=0;std::vector<std::pair<uint64_t,uint64_t>> masks;};
 struct Meta {
     uint32_t post=0,cont=0;uint64_t n=0,marks=0;std::vector<int> perm;std::vector<Contig> contigs;
     void write(const std::string&p)const{
         FILE*f=fopen(p.c_str(),"wb");if(!f)fail("create PFP metadata");
-        if(fwrite("SXGPFP1\0",1,8,f)!=8)fail("write PFP metadata magic");
+        if(fwrite("SXGPFP1\0",1,8,f)!=8)fail("write PFP metadata "+p+": "+strerror(errno));
         put(f,40,4);put(f,post,4);put(f,cont,4);put(f,perm.size(),4);put(f,n,8);put(f,marks,8);
         for(int x:perm)put(f,x,4);
         for(auto&c:contigs){put(f,c.forward,8);put(f,c.reverse,8);put(f,c.length,8);put(f,c.masks.size(),8);
             for(auto m:c.masks){put(f,m.first,8);put(f,m.second,8);}}
-        if(fclose(f))fail("close PFP metadata");
+        if(fclose(f))fail("close PFP metadata "+p+": "+strerror(errno));
     }
     static Meta read(const std::string&p){
         FILE*f=fopen(p.c_str(),"rb");if(!f)fail("open PFP metadata "+p);char magic[8];

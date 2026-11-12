@@ -345,6 +345,6 @@ int run(int argc,char**argv){
     return 0;
 }
 }
-int main(int argc,char**argv){try{if(argc==2&&!strcmp(argv[1],"--help")){
+int main(int argc,char**argv){try{sjio::guard_stdout("pfp-emit");if(argc==2&&!strcmp(argv[1],"--help")){
     puts("pfp-emit --text COLLECTION --sa SA_FIFO --output PRIVATE_STAGING --sample NAME=MARK_PREFIX [--sample ...] [--storage positions|legacy|source|joint-template] [--threads N] [--joint-copies F --joint-reference-meta F --joint-target-meta F]\nConsumes 5-byte PFP SA values; default storage positions (v2); source (v3) stores no key dictionary; no full SA is stored.");return 0;}return run(argc,argv);
 }catch(const std::exception&e){std::cerr<<"pfp-emit failed: "<<e.what()<<'\n';return 1;}}

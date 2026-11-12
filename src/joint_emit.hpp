@@ -11,15 +11,18 @@ void joint_write_view(const fs::path&path,const fs::path&root,unsigned selected,
     auto raw=joint_metadata(m),packed=sxgc_positions::compress(raw);put64(h.data()+48,HEADER);put64(h.data()+56,packed.size());put64(h.data()+64,raw.size());put32(h.data()+72,crc(raw));put64(h.data()+80,HEADER+packed.size());source.bind(h);
     Bytes extra;auto rel=fs::relative(root,path.parent_path()).string();varint(extra,rel.size());extra.insert(extra.end(),rel.begin(),rel.end());for(auto*map:{&amap,&bmap}){varint(extra,map->size());for(auto x:*map){auto at=extra.size();extra.resize(at+4);put32(extra.data()+at,uint32_t(x));}}
     File order(root/"joint.order");auto order_header=read_at(order.fd,0,HEADER);put32(h.data()+92,u32(order_header.data()+124));
-    put32(h.data()+88,crc(extra));put32(h.data()+124,crc32(0,h.data(),124));auto tmp=path;tmp+=".partial";FILE*f=fopen(tmp.c_str(),"wb");if(!f)fail("create joint view");write(f,h.data(),h.size());write(f,packed.data(),packed.size());write(f,extra.data(),extra.size());if(fflush(f)||fsync(fileno(f))||fclose(f))fail("flush joint view");fs::rename(tmp,path);
+    put32(h.data()+88,crc(extra));put32(h.data()+124,crc32(0,h.data(),124));auto tmp=path;tmp+=".partial";FILE*f=fopen(tmp.c_str(),"wb");if(!f)fail("create joint view");write(f,h.data(),h.size());write(f,packed.data(),packed.size());write(f,extra.data(),extra.size());if(fflush(f)||fsync(fileno(f))||fclose(f))fail("flush joint view "+tmp.string()+": "+strerror(errno));fs::rename(tmp,path);
 }
 // Raw (pre-zlib) joint.order block: origin and weight bit planes, then the
 // run-length list of weights above one. Pure function of the block's rows, so
 // it runs on the encode pool.
-Bytes joint_order_raw(const unsigned char*origin,const uint64_t*weight,unsigned n){
+Bytes joint_order_raw(const unsigned char*origin,const uint64_t*weight,const unsigned char*lcp,unsigned n){
     size_t plane=(n+7)/8;Bytes packed(plane*2),exceptions;uint64_t last=0,count=0;
     for(unsigned i=0;i<n;++i){if(origin[i])packed[i/8]|=1u<<(i%8);if(weight[i])packed[plane+i/8]|=1u<<(i%8);if(weight[i]>1){varint(exceptions,i-last);varint(exceptions,weight[i]);last=i;++count;}}
-    varint(packed,count);packed.insert(packed.end(),exceptions.begin(),exceptions.end());return packed;
+    varint(packed,count);packed.insert(packed.end(),exceptions.begin(),exceptions.end());
+    auto lcp_plane=sgu::lcp_encode(lcp,n); // one LCP code per row (0 = new 12-base panel, else 12..40), entropy coded
+    packed.insert(packed.end(),lcp_plane.begin(),lcp_plane.end());
+    return packed;
 }
 // Receives every selected row of both samples in one global key order and
 // computes what joint-pack's merge computes: joint.order (origin and weight per
@@ -33,27 +36,27 @@ class JointSink {
     // Fixed, uninitialised row arrays: blocks are recycled, so the hot path neither allocates nor zeroes.
     struct Block {
         unsigned n=0,anchors=0;uint64_t ar=0,br=0;
-        std::unique_ptr<unsigned char[]>origin{new unsigned char[BLOCK]};std::unique_ptr<uint32_t[]>prefix{new uint32_t[BLOCK]},contig{new uint32_t[BLOCK]};
+        std::unique_ptr<unsigned char[]>origin{new unsigned char[BLOCK]},lcp{new unsigned char[BLOCK]};std::unique_ptr<uint32_t[]>prefix{new uint32_t[BLOCK]},contig{new uint32_t[BLOCK]};
         std::unique_ptr<uint64_t[]>anchor{new uint64_t[BLOCK]};
     };
     struct Result {Encoded encoded;std::vector<uint64_t>weight;std::shared_ptr<Block>block;};
     static constexpr size_t KEY=10;
-    fs::path root;std::string an,bn;pm::Meta am,bm;std::vector<jc::Copy>copies;jc::Intervals tree;std::vector<int>perm;
+    fs::path root;std::string an,bn;pm::Meta am,bm;std::vector<jc::Copy>copies;jc::Stab stab;std::vector<int>perm;
     Writer order;std::vector<JointDirectory>dir;std::vector<int64>bc=std::vector<int64>(1u<<24);
-    uint64_t ar=0,br=0,bt=0,pending_b=0,counted_b=0,reordered=0;unsigned char current[KEY]={};bool have=false;uint32_t current_prefix_=0;
+    uint64_t ar=0,br=0,bt=0,pending_b=0,counted_b=0,reordered=0;unsigned char current[KEY]={};bool have=false;uint32_t current_prefix_=0;unsigned char next_lcp=0;
     std::shared_ptr<Block>block;std::vector<std::shared_ptr<Block>>spare;std::deque<std::future<std::shared_ptr<Result>>>queue;size_t window;
     // Weight of a reference row is the number of copy intervals covering its seed.
     std::shared_ptr<Result> encode(std::shared_ptr<Block>b)const{
-        auto r=std::make_shared<Result>();r->weight.resize(b->n);std::vector<size_t>matches;unsigned next=0;
+        auto r=std::make_shared<Result>();r->weight.resize(b->n);unsigned next=0;
         for(unsigned i=0;i<b->n;++i){
             if(b->origin[i])r->weight[i]=1;
-            else{tree.get(b->contig[next],b->anchor[next],matches);++next;r->weight[i]=matches.size();}
+            else{auto*g=stab.segment(b->contig[next],b->anchor[next]);++next;r->weight[i]=g?g->n:0;}
         }
-        auto raw=joint_order_raw(b->origin.get(),r->weight.data(),b->n);auto packed=sxgc_positions::compress(raw);auto c=crc(raw);
+        auto raw=joint_order_raw(b->origin.get(),r->weight.data(),b->lcp.get(),b->n);auto packed=sxgc_positions::compress(raw);auto c=crc(raw);
         r->encoded=Encoded{std::move(raw),std::move(packed),c,0,0};r->block=std::move(b);return r;
     }
     void reduce_front(){
-        auto r=queue.front().get();queue.pop_front();const Block&b=*r->block;
+        auto r=get_helping(queue.front());queue.pop_front();const Block&b=*r->block;
         dir.push_back({b.ar,b.br,b.ar,uint64_t(bt)});
         for(unsigned i=0;i<b.n;++i){
             uint64_t weight=r->weight[i];auto prefix=b.prefix[i];
@@ -71,7 +74,7 @@ class JointSink {
     void emit(unsigned char origin,uint32_t prefix,uint32_t contig,uint64_t anchor){
         if(!block){if(spare.empty())block=std::make_shared<Block>();else{block=std::move(spare.back());spare.pop_back();}}
         Block&b=*block;if(!b.n){b.ar=ar;b.br=br;}
-        b.origin[b.n]=origin;b.prefix[b.n]=prefix;if(!origin){b.contig[b.anchors]=contig;b.anchor[b.anchors++]=anchor;}
+        b.origin[b.n]=origin;b.lcp[b.n]=next_lcp;next_lcp=40;b.prefix[b.n]=prefix;if(!origin){b.contig[b.anchors]=contig;b.anchor[b.anchors++]=anchor;}
         ++b.n;if(origin)++br;else ++ar;
         if(b.n==BLOCK)submit_block();
     }
@@ -80,16 +83,16 @@ class JointSink {
 public:
     JointSink(const fs::path&dest,const std::string&reference,const std::string&target,const fs::path&copy,const fs::path&ameta,const fs::path&bmeta,const std::vector<int>&reference_perm)
       :root(dest),an(reference),bn(target),am(pm::Meta::read(ameta.string())),bm(pm::Meta::read(bmeta.string())),copies(jc::load(copy.string(),am,bm)),
-       tree(copies,am.contigs.size()),perm(reference_perm),order(dest/"joint.order",ORDER_MAGIC,10),window(std::max<size_t>(4,4*size_t(encode_threads))){
-        put32(order.h.data()+76,1);
+       stab(copies,am.contigs.size(),encode_threads),perm(reference_perm),order(dest/"joint.order",ORDER_MAGIC,10),window(std::max<size_t>(4,4*size_t(encode_threads))){
+        put32(order.h.data()+76,2);
         fs::copy_file(copy,root/"joint.copies");fs::copy_file(ameta,root/"reference.meta");fs::copy_file(bmeta,root/"target.meta");
     }
     JointSink(const JointSink&)=delete;
-    ~JointSink(){for(auto&f:queue)if(f.valid())f.wait();}
+    ~JointSink(){GateRelease idle;for(auto&f:queue)if(f.valid())f.wait();}
     // One selected seed in global key order; sample 0 is the reference. rank and
     // pos are the contig rank and position stored in the row's payload.
     void add(unsigned sample,const unsigned char*key,uint64_t rank,uint64_t pos,bool reverse){
-        if(!have||memcmp(key,current,KEY)){flush_target();memcpy(current,key,KEY);have=true;current_prefix_=(uint32_t(key[0])<<16)|(uint32_t(key[1])<<8)|key[2];}
+        if(!have||memcmp(key,current,KEY)){flush_target();next_lcp=have?sgu::lcp_code(current,key):0;memcpy(current,key,KEY);have=true;current_prefix_=(uint32_t(key[0])<<16)|(uint32_t(key[1])<<8)|key[2];}
         if(sample){++pending_b;return;}
         if(rank>=perm.size()||(reverse&&pos<40))fail("invalid joint source coordinate");
         if(pending_b){reordered+=pending_b-counted_b;counted_b=pending_b;} // target rows that arrived before a reference row of the same key

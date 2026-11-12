@@ -9,6 +9,7 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include "stdout_guard.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <condition_variable>
@@ -20,6 +21,8 @@ extern "C" {
 #include <future>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -35,7 +38,10 @@ extern "C" {
 #include <unistd.h>
 #include <zlib.h>
 #include "position_codec.hpp"
+#include "sxgc_gate.h"
 #include "joint_copies.hpp"
+#include "joint_union_core.hpp"
+#include <atomic>
 
 namespace sg {
 namespace fs = std::filesystem;
@@ -88,8 +94,12 @@ void put32(unsigned char *p,uint32_t x) { for(int i=0;i<4;++i){p[i]=x&255;x>>=8;
 void put64(unsigned char *p,uint64_t x) { for(int i=0;i<8;++i){p[i]=x&255;x>>=8;} }
 // libdeflate computes the same CRC-32 as zlib, with carry-less multiplication.
 uint32_t crc(const Bytes &b) { return libdeflate_crc32(0,b.data(),b.size()); }
+std::string file_name(FILE *f) {
+    char link[64],name[4096];std::snprintf(link,sizeof link,"/proc/self/fd/%d",fileno(f));
+    ssize_t len=readlink(link,name,sizeof name-1);return len>0?std::string(name,len):std::string();
+}
 void write(FILE *f,const void *p,size_t n) {
-    if(n && fwrite(p,1,n,f)!=n) fail("write failed: "+std::string(strerror(errno)));
+    if(n && fwrite(p,1,n,f)!=n) {int e=errno;auto name=file_name(f);fail("write failed"+(name.empty()?std::string():" for "+name)+": "+strerror(e));}
 }
 Bytes read_at(int fd,uint64_t off,size_t n) {
     Bytes b(n); size_t done=0;
@@ -118,7 +128,7 @@ struct Archive {
         h=read_at(f->fd,0,HEADER);
         version=u32(h.data()+8);
         bool sample=!memcmp(magic,SAMPLE_MAGIC,8),templ=!memcmp(magic,TEMPLATE_MAGIC,8);
-        bool supported=sample?(version>=1&&version<=3):templ?version==4:version==1;
+        bool supported=sample?(version>=1&&version<=3):templ?(version==4||version==5):version==1;
         if(memcmp(h.data(),magic,8)||!supported||u32(h.data()+124)!=crc32(0,h.data(),124))
             fail("shared header magic/version/checksum mismatch: "+p.string());
         width=u32(h.data()+12);rows=u32(h.data()+20);count=u64(h.data()+24);
@@ -134,13 +144,19 @@ struct Archive {
             b.codec=b.raw>>30;b.raw&=0x3fffffff;
             if(b.off<end||b.off>off||b.packed>off-b.off||!b.packed||
                b.count!=std::min<uint64_t>(rows,count-i*rows)||b.raw>BLOCK*256||!b.raw||
-               b.codec>2||(version==1&&b.codec))
+               b.codec>(templ&&version==5?3:2)||(version==1&&b.codec)||(b.codec==3&&b.packed!=b.raw))
                 fail("invalid shared block bounds");
             blocks.push_back(b);end=b.off+b.packed;
         }
     }
     Bytes decode(size_t i) const {
-        const auto &b=blocks.at(i);Bytes packed=read_at(f->fd,b.off,b.packed),raw(b.raw);
+        const auto &b=blocks.at(i);
+        if(b.codec==sxgc_positions::PACKED){ // stored as is: no entropy stage
+            Bytes raw=read_at(f->fd,b.off,b.packed);
+            if(crc(raw)!=b.checksum)fail("shared block checksum mismatch");
+            return raw;
+        }
+        Bytes packed=read_at(f->fd,b.off,b.packed),raw(b.raw);
         if(!sxgc_positions::inflate_exact(raw.data(),raw.size(),packed.data(),packed.size())||crc(raw)!=b.checksum)fail("shared block decompression/checksum mismatch");
         return raw;
     }
@@ -150,42 +166,47 @@ struct Archive {
 // identical for every thread count, and one thread encodes inline as before.
 // --threads N counts the computing main thread, so the pool has N-1 workers.
 unsigned encode_threads=1;
+inline bool gate_active(){return sxgc_gate_active();}
 struct Encoded {Bytes raw,packed;uint32_t checksum;unsigned codec;size_t legacy_bytes;};
 class EncodePool {
-    std::mutex m;std::condition_variable ready;std::deque<std::function<void()>> jobs;
+    std::mutex m;std::condition_variable ready;std::deque<std::function<void()>> jobs,hot; // hot: short block-encode jobs, taken before the long jobs
     std::vector<std::thread> workers;bool stop=false;
 public:
     explicit EncodePool(unsigned n){
         for(unsigned i=0;i<n;++i)workers.emplace_back([this]{for(;;){std::function<void()> job;
-            {std::unique_lock<std::mutex> lock(m);ready.wait(lock,[this]{return stop||!jobs.empty();});
-             if(jobs.empty())return;job=std::move(jobs.front());jobs.pop_front();}
-            job();}});
+            {std::unique_lock<std::mutex> lock(m);ready.wait(lock,[this]{return stop||!jobs.empty()||!hot.empty();});
+             if(!take(job))return;}
+            {GateHold token;job();}}});
     }
     ~EncodePool(){{std::lock_guard<std::mutex> lock(m);stop=true;}ready.notify_all();for(auto &t:workers)t.join();}
-    void post(std::function<void()> job){
-        {std::lock_guard<std::mutex> lock(m);jobs.emplace_back(std::move(job));}
+    // Caller holds the lock: pops a hot job first, else the oldest long job.
+    bool take(std::function<void()> &job){
+        auto &q=hot.empty()?jobs:hot;if(q.empty())return false;job=std::move(q.front());q.pop_front();return true;}
+    void post(std::function<void()> job,bool urgent=false){
+        {std::lock_guard<std::mutex> lock(m);(urgent?hot:jobs).emplace_back(std::move(job));}
         ready.notify_one();
     }
     // Lets a thread that would otherwise wait run one queued job (jobs never wait on jobs).
     bool run_one(){
         std::function<void()> job;
-        {std::lock_guard<std::mutex> lock(m);if(jobs.empty())return false;job=std::move(jobs.front());jobs.pop_front();}
-        job();return true;
+        {std::lock_guard<std::mutex> lock(m);if(!take(job))return false;}
+        {GateHold token(true);job();}return true;
     }
     std::future<Encoded> submit(std::function<Encoded()> f){
         auto task=std::make_shared<std::packaged_task<Encoded()>>(std::move(f));auto result=task->get_future();
-        post([task]{(*task)();});return result;
+        post([task]{(*task)();},true);return result;
     }
 };
 // Threads a program runs beside main outside the pool (set before first use).
 unsigned side_threads=0;
 // Pool workers: --threads counts the main thread and the side threads. When none is left, jobs run inline.
-unsigned pool_size(){return encode_threads>1+side_threads?encode_threads-1-side_threads:0;}
+// Under the shared budget every thread that waits holds no token, so the pool may have as many workers as the budget has tokens.
+unsigned pool_size(){return gate_active()?(encode_threads>1?encode_threads:0):encode_threads>1+side_threads?encode_threads-1-side_threads:0;}
 EncodePool &encode_pool(){static EncodePool pool(pool_size());return pool;}
 // Waits for a pool result on the main thread, running queued jobs meanwhile so the thread is not idle.
 template<class T> T get_helping(std::future<T> &f){
     if(pool_size())while(f.wait_for(std::chrono::seconds(0))!=std::future_status::ready)
-        if(!encode_pool().run_one())f.wait_for(std::chrono::microseconds(100));
+        if(!encode_pool().run_one()){GateRelease idle;f.wait_for(std::chrono::microseconds(100));}
     return f.get();
 }
 // Generic pool task for the joint pack readers. One thread runs the task inline,
@@ -204,19 +225,21 @@ void threads(const std::string &value){
 struct Writer {
     FILE *f=nullptr;fs::path path,identity; // identity names the sample whose GDB/BPS back the keys
     Bytes h=Bytes(HEADER);std::vector<Block> blocks;
-    uint64_t count=0;uint32_t width;std::array<uint64_t,3> codecs{};
+    uint64_t count=0;uint32_t width;std::array<uint64_t,4> codecs{};
     uint64_t legacy_bytes=0,stored_bytes=0;bool materialize;
+    std::shared_ptr<const sxgc_positions::Domain> domain; // set: joint rows are bit-packed (version 5 archives)
     std::deque<std::pair<std::future<Encoded>,uint32_t>> pending;
     Writer(const fs::path &p,const char *magic,uint32_t w,bool publish=true):path(p),identity(p),width(w),materialize(publish){
         memcpy(h.data(),magic,8);put32(h.data()+8,1);put32(h.data()+12,w);put32(h.data()+20,BLOCK);
         if(materialize){f=fopen(p.c_str(),"wb+");if(!f)fail("create "+p.string());write(f,h.data(),h.size());}
     }
-    ~Writer(){for(auto &p:pending)if(p.first.valid())p.first.wait();if(f)fclose(f);}
+    ~Writer(){{GateRelease idle;for(auto &p:pending)if(p.first.valid())p.first.wait();}if(f)fclose(f);}
     void append(const Encoded &e,uint32_t n){
         auto off=ftello(f);if(off<0)fail("tell output");
-        if(e.raw.size()>BLOCK*256||e.packed.size()>UINT32_MAX||e.codec>2)fail("invalid encoded block");
-        blocks.push_back({uint64_t(off),uint32_t(e.packed.size()),uint32_t(e.raw.size()),e.checksum,n,e.codec});
-        write(f,e.packed.data(),e.packed.size());++codecs[e.codec];stored_bytes+=e.packed.size();legacy_bytes+=e.legacy_bytes;
+        if(e.raw.size()>BLOCK*256||e.packed.size()>UINT32_MAX||e.codec>3)fail("invalid encoded block");
+        const Bytes &stored=e.codec==sxgc_positions::PACKED?e.raw:e.packed;
+        blocks.push_back({uint64_t(off),uint32_t(stored.size()),uint32_t(e.raw.size()),e.checksum,n,e.codec});
+        write(f,stored.data(),stored.size());++codecs[e.codec];stored_bytes+=stored.size();legacy_bytes+=e.legacy_bytes;
     }
     void write_front(){auto n=pending.front().second;auto e=get_helping(pending.front().first);pending.pop_front();append(e,n);}
     void drain(){while(!pending.empty())write_front();}
@@ -239,7 +262,7 @@ struct Writer {
     void projection_block(const Bytes &raw,uint32_t n,unsigned post,unsigned cont,std::function<void()> check={}){
         if(!n)return;
         if(u32(h.data()+8)==1){block(raw,n,std::move(check));return;}
-        submit([raw,n,post,cont,check]{if(check)check();auto p=sxgc_positions::pack(raw,n,post,cont);auto c=crc(p.raw);
+        submit([raw,n,post,cont,check,domain=domain]{if(check)check();auto p=sxgc_positions::pack(raw,n,post,cont,domain.get());auto c=crc(p.raw);
             return Encoded{std::move(p.raw),std::move(p.packed),c,p.codec,p.legacy_bytes};},n);
     }
     void finish(){
@@ -251,8 +274,8 @@ struct Writer {
         write(f,dir.data(),dir.size());put64(h.data()+24,count);put64(h.data()+32,blocks.size());
         put64(h.data()+40,off);put32(h.data()+116,crc(dir));put32(h.data()+124,crc32(0,h.data(),124));
         if(fseeko(f,0,SEEK_SET))fail("seek output header");write(f,h.data(),h.size());
-        if(fflush(f)||fsync(fileno(f)))fail("flush shared output");
-        if(fclose(f))fail("close shared output");f=nullptr;
+        if(fflush(f)||fsync(fileno(f)))fail("flush shared output "+path.string()+": "+strerror(errno));
+        if(fclose(f)){int e=errno;f=nullptr;fail("close shared output "+path.string()+": "+strerror(e));}f=nullptr;
     }
 };
 void varint(Bytes &out,uint64_t v){while(v>=128){out.push_back((v&127)|128);v>>=7;}out.push_back(v);}
@@ -508,6 +531,7 @@ struct DirectWriter {
     std::shared_ptr<SourceCheck> source;Bytes checks; // key+payload rows awaiting verification
     uint64_t last=0;uint32_t n=0;
     Metadata template_meta; // physical-archive metadata, set by finish_template
+    std::vector<uint64_t> domain_lengths; // contig lengths by rank (version 5 metadata)
     DirectWriter(const fs::path&p,DirectInput&i):w(p,SAMPLE_MAGIC,i.kbytes),in(i),prefix(1u<<24){
         put32(w.h.data()+8,storage_version());
         put32(w.h.data()+16,i.csize);
@@ -519,10 +543,13 @@ struct DirectWriter {
     // joint_compact_write; keys are checked against the sample's own GDB.
     DirectWriter(const fs::path&sgr,const fs::path&sample,DirectInput&i):w(sgr,TEMPLATE_MAGIC,i.kbytes),in(i),prefix(1u<<24){
         w.identity=sample;
-        put32(w.h.data()+8,4);
         put32(w.h.data()+16,i.csize);
         put32(w.h.data()+76,1);
         source=std::make_shared<SourceCheck>(w,i.kmer,i.post,i.cont,i.perm);
+        // Version 5: bit-packed global coordinates; version 4 only if the domain is too wide.
+        domain_lengths=contig_lengths_by_rank(source->source,i.perm);
+        w.domain=sxgc_positions::Domain::make(domain_lengths);
+        put32(w.h.data()+8,w.domain?5:4);
     }
     static void append(Bytes &out,const Bytes &b){auto at=out.size();out.resize(at+b.size());memcpy(out.data()+at,b.data(),b.size());}
     void add(uint64_t id){
@@ -567,6 +594,7 @@ struct DirectWriter {
         m.maxpre=maxpre;
         Bytes meta(24+uint64_t(in.ncontig)*4);put32(meta.data(),40);put32(meta.data()+4,in.post);put32(meta.data()+8,in.cont);put32(meta.data()+12,in.ncontig);put64(meta.data()+16,w.count);
         for(int i=0;i<int(in.ncontig);++i)put32(meta.data()+24+4*i,in.perm[i]);
+        if(w.domain)for(auto length:domain_lengths)varint(meta,length);
         auto packed=sxgc_positions::compress(meta);auto off=ftello(w.file());if(off<0)fail("template metadata offset");
         put64(w.h.data()+48,off);put64(w.h.data()+56,packed.size());put64(w.h.data()+64,meta.size());put32(w.h.data()+72,crc(meta));
         write(w.file(),packed.data(),packed.size());memcpy(w.h.data()+80,dictionary.h.data()+80,16);verify_source(w);w.finish();
@@ -649,7 +677,7 @@ void verify(const fs::path &source,const fs::path &shared){
     std::cout<<"{\"exact_rows_verified\":"<<rows<<",\"status\":\"PASS\"}\n";
 }
 void inspect(const fs::path &path){
-    Shared s(path);std::array<uint64_t,3> codecs{};uint64_t packed=0,raw=0;
+    Shared s(path);std::array<uint64_t,4> codecs{};uint64_t packed=0,raw=0;
     for(const auto &b:s.a.blocks){++codecs[b.codec];packed+=b.packed;raw+=b.raw;}
     std::cout<<"{\"format_version\":"<<s.a.version<<",\"rows\":"<<s.a.count
         <<",\"unique_keys\":"<<u64(s.a.h.data()+80)<<",\"file_bytes\":"<<s.a.f->size
@@ -786,19 +814,25 @@ extern "C" uint64_t sxgc_joint_count(const unsigned char*a,const unsigned char*b
 extern "C" uint64_t sxgc_joint_row(const unsigned char*p){return sg::u64(p+17);}
 extern "C" void sxgc_joint_fetch(Kmer_Stream*s,uint64_t row,unsigned char*out){sg::fatal([&]{auto state=dynamic_cast<sg::JointStream*>(static_cast<sg::StreamState*>(s->shared));if(!state)sg::fail("weighted locate requires a joint stream");state->fetch(row,out);});}
 extern "C" void sxgc_joint_fetch_range(Kmer_Stream*s,uint64_t row,uint64_t count,unsigned char*out){sg::fatal([&]{auto state=dynamic_cast<sg::JointStream*>(static_cast<sg::StreamState*>(s->shared));if(!state)sg::fail("weighted locate requires a joint stream");state->fetch_range(row,count,out);});}
+extern "C" void *sxgc_union_plan(Kmer_Stream*t1,Kmer_Stream*t2,int64_t freq,int flip){return sg::fatal([&]()->void*{auto p=sg::union_plan(t1,t2,uint64_t(freq),flip!=0);return p?new std::shared_ptr<sg::UnionPlan>(std::move(p)):nullptr;});}
+extern "C" void sxgc_union_plan_free(void*plan){delete static_cast<std::shared_ptr<sg::UnionPlan>*>(plan);}
+extern "C" void *sxgc_union_worker(void*plan){return sg::fatal([&]()->void*{return new sg::UnionWorker(*static_cast<std::shared_ptr<sg::UnionPlan>*>(plan));});}
+extern "C" void sxgc_union_worker_free(void*worker){delete static_cast<sg::UnionWorker*>(worker);}
+extern "C" int sxgc_union_next(void*worker,Sxgc_Group*out){return sg::fatal([&]()->int{sg::UnionGroup g;if(!static_cast<sg::UnionWorker*>(worker)->next(g))return 0;out->plen=int(g.plen);out->n1=g.n1;out->n2=g.n2;out->t1=g.t1;out->t2=g.t2;out->stride1=g.stride1;out->stride2=g.stride2;return 1;});}
+extern "C" int sxgc_union_progress(void*worker){return static_cast<sg::UnionWorker*>(worker)->progress();}
 extern "C" int sxgc_stream_find(Kmer_Stream *s,const unsigned char *key){return sg::fatal([&]{
     int prefix=(unsigned(key[0])<<16)|(unsigned(key[1])<<8)|key[2];int64_t lo=prefix?s->index[prefix-1]:0,hi=s->index[prefix];
     while(lo<hi){int64_t mid=lo+(hi-lo)/2;sxgc_stream_seek(s,mid);if(memcmp(s->csuf,key+3,s->hbyte)<0)lo=mid+1;else hi=mid;}
     sxgc_stream_seek(s,lo);return s->csuf&&s->cpre==prefix&&!memcmp(s->csuf,key+3,s->hbyte);});}
 extern "C" int sxgc_post_info(const char *path,Sxgc_Post_Info *out){
     if(!sxgc_is_shared(path))return 0;
-    return sg::fatal([&]{auto m=[&](){if(sg::joint_view(path))return sg::View(path).m;sg::Archive a(path,sg::SAMPLE_MAGIC);return sg::metadata(sg::unpack_meta(a),sg::u32(a.h.data()+16));}();
+    return sg::fatal([&]{auto m=[&](){if(sg::joint_view(path))return sg::warm_view(path)->m;sg::Archive a(path,sg::SAMPLE_MAGIC);return sg::metadata(sg::unpack_meta(a),sg::u32(a.h.data()+16));}();
         out->post_bytes=m.post;out->cont_bytes=m.cont;out->ncontig=m.ncontig;out->frequency=m.freq;out->max_prefix=m.maxpre;
         out->permutation=static_cast<int*>(malloc(std::max<size_t>(1,m.perm.size())*sizeof(int)));if(!out->permutation)sg::fail("allocate contig permutation");
         memcpy(out->permutation,m.perm.data(),m.perm.size()*sizeof(int));return 1;});
 }
 #ifdef SXGC_PACK_MAIN
-int main(int argc,char **argv){try{
+int main(int argc,char **argv){try{sjio::guard_stdout("gixshare");
     if(argc==3&&!strcmp(argv[1],"verify-seek")){sg::joint_check_seek(argv[2]);return 0;}
     if(argc==8&&!strcmp(argv[1],"compare-seeds")){sg::joint_compare_seeds(argv[2],argv[3],argv[4],argv[5],argv[6],argv[7]);return 0;}
     if((argc==8||(argc==10&&!strcmp(argv[8],"--threads")))&&!strcmp(argv[1],"joint-pack")){

@@ -8,7 +8,9 @@ two named inputs, an explicit reference and k=40.
 1. Construct GDB sequence storage and collect native selected-position bitmaps
    for both strands, with the oriented marked texts.
 2. Index the reference's minimizers (both strands). Look up the target's
-   minimizers, extend each hit to the maximal exact run with DNA comparisons,
+   minimizers, reject hits whose stored 16-base flank signatures show that no
+   exact run through them can reach 40 bases (a conservative filter: the selected
+   copies are unchanged), extend each remaining hit to the maximal exact run with DNA comparisons,
    select disjoint blocks, re-anchor the gaps between them and coalesce
    compatible copies without crossing contig boundaries. No suffix array and no
    PFP parse are involved.

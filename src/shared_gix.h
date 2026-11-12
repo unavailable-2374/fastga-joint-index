@@ -28,6 +28,18 @@ uint64_t sxgc_joint_row(const unsigned char *record);
 void sxgc_joint_fetch(Kmer_Stream *s,uint64_t row,unsigned char *record);
 /* Restore a contiguous accepted range in one call; count native-shaped rows. */
 void sxgc_joint_fetch_range(Kmer_Stream *s,uint64_t row,uint64_t count,unsigned char *records);
+/* Union-LCP seed merge of two views of one joint bundle (NULL plan when not applicable). A worker per thread
+   claims chunks of the joint order and returns one group per view-one row: the view-one records (stride1 bytes
+   each, native shaped) against the view-two records (stride2 bytes each) sharing plen bases with it. Pointers
+   stay valid until the next call. flip: t1 is the second genome; records the native pairing would drop for their
+   strand (view-one reverse unless flip, view-two reverse if flip) are never restored. */
+typedef struct { int plen; uint64_t n1, n2; const unsigned char *t1, *t2; unsigned stride1, stride2; } Sxgc_Group;
+void *sxgc_union_plan(Kmer_Stream *t1, Kmer_Stream *t2, int64_t freq, int flip);
+void sxgc_union_plan_free(void *plan);
+void *sxgc_union_worker(void *plan);
+void sxgc_union_worker_free(void *worker);
+int sxgc_union_next(void *worker, Sxgc_Group *group);
+int sxgc_union_progress(void *worker);
 #ifdef __cplusplus
 }
 #endif

@@ -1,5 +1,6 @@
 #pragma once
 #include "native_runtime.hpp"
+#include "sxgc_gate.h"
 
 namespace fg {
 struct BuildSettings {
@@ -92,14 +93,22 @@ class FastaBuilder {
     // Thread budget: the programs of a concurrent stage run side by side, and the
     // threads each computes with sum to at most -T; a serial stage runs them one
     // after another. Threads that only wait (joins, blocked pipe writes) do not count.
-    void allot(const std::string &stage, const std::vector<std::pair<std::string,int>> &parts, bool concurrent=true) {
+    // pool>0: the programs of the stage share a pool of `pool` (= -T) compute tokens (src/sxgc_gate.h). Each program keeps
+    // the width in its own thread flag (at most -T), so one can use the whole budget while the others wait on a pipe,
+    // but a thread computes only while it holds a token: the threads that compute at any moment never exceed -T.
+    // The report records the pool and, after the stage, the peak number of token holders the gate measured.
+    void allot(const std::string &stage, const std::vector<std::pair<std::string,int>> &parts, bool concurrent=true, int pool=0) {
         int total=0; Json programs=Json::object();
         for (const auto &[name,n]:parts) {
             if (n<1) throw std::runtime_error("thread plan for "+stage+" gives "+name+" no thread");
             programs[name]=n; total=concurrent?total+n:std::max(total,n);
         }
-        if (total>threads_) throw std::runtime_error("thread plan for "+stage+" uses "+std::to_string(total)+" threads, over the -T budget of "+std::to_string(threads_));
-        if (!verifying_) report_["thread_allocation"][stage]={{"programs",programs},{"schedule",concurrent?"concurrent":"serial"},{"total",total}};
+        if (pool) {
+            if (pool>threads_) throw std::runtime_error("thread plan for "+stage+" pools "+std::to_string(pool)+" threads, over the -T budget of "+std::to_string(threads_));
+            for (const auto &[name,n]:parts) if (n>pool) throw std::runtime_error("thread plan for "+stage+" gives "+name+" "+std::to_string(n)+" threads, over the -T budget of "+std::to_string(threads_));
+            total=pool;
+        } else if (total>threads_) throw std::runtime_error("thread plan for "+stage+" uses "+std::to_string(total)+" threads, over the -T budget of "+std::to_string(threads_));
+        if (!verifying_) report_["thread_allocation"][stage]={{"programs",programs},{"schedule",pool?"shared-pool":concurrent?"concurrent":"serial"},{"total",total}};
     }
     // FASTGA_SHARED_<NAME>="x,y" replaces a default split for measurements; allot() still checks it.
     static bool split_override(const char *variable, int &x, int &y) {
@@ -314,21 +323,46 @@ class FastaBuilder {
         // The sorters stream into the block encoder side by side: n producers of P
         // threads plus an encoder of E threads (main included). When the budget
         // cannot give each one a thread, the streams spool and every step gets -T.
-        // Measured on the macaque pair (3.0e9 rows): the sorters need 590 core-seconds in
-        // all, the consumer about 3000 (range merge, weights, block packing), so the
-        // consumer gets almost everything: P = max(1,T/12) per producer.
+        // Static plan: P = max(1,T/12) per producer and E = T-nP (the consumer needs about five times the
+        // CPU time of both sorters, so it gets almost everything). It is the plan of independent samples and of
+        // an explicit FASTGA_SHARED_NATIVE_SPLIT=P,E.
+        // Shared-pool plan (two samples, fused joint writer): the sorters burst (the k-mer partition and every sorted part)
+        // and then block on the full pipe behind the consumer, which is the bottleneck. All three programs draw their compute
+        // from one pool of T tokens: a producer is a third of the budget wide (P = max(1,T/3), 8 at -T24) and the consumer as wide as the
+        // whole budget, so whichever side has work uses the threads the other leaves idle, while the threads that compute at
+        // any moment never exceed -T (the gate records the peak).
         int n=static_cast<int>(samples.size()),producers=std::min(std::max(1,threads_/12),(threads_-1)/n),encoder=threads_-n*producers;
-        split_override("FASTGA_SHARED_NATIVE_SPLIT",producers,encoder);
-        bool sequential=producers<1;
-        if (sequential) producers=encoder=threads_;
-        std::vector<std::pair<std::string,int>> plan;
-        for (const auto &sample:samples) plan.emplace_back(sample.at("sample").get<std::string>(),producers);
-        plan.emplace_back("merge",encoder);
-        allot("native-sort-stream",plan,!sequential);
-        Command merge={(binary_/"gixshare").string(),"build-stream","-o",stage_.string(),"--storage",storage,
-                       "--threads",std::to_string(encoder)};
+        std::vector<int> per(n,producers);
+        int pool=0;
         int ranges=stream_ranges_;
         if (const char *value=std::getenv("FASTGA_SHARED_STREAM_RANGES"); value && ranges<0) ranges=std::stoi(value);
+        // --ranges 0 is the serial consumer loop (the byte-level oracle); it does not take part in the token pool.
+        if (n==2 && !extra.empty() && threads_>=3 && ranges!=0) {
+            per.assign(n,std::max(1,threads_/3)); encoder=threads_; pool=threads_;
+        }
+        if (const char *value=std::getenv("FASTGA_SHARED_NATIVE_SPLIT"); value && n==2) {
+            int a=-1,b=-1,c=-1; char end=0;
+            if (std::sscanf(value,"%d,%d,%d%c",&a,&b,&c,&end)==3) {
+                if (a<0 || b<0 || c<1) throw std::runtime_error("FASTGA_SHARED_NATIVE_SPLIT must be X,Y or REFERENCE,TARGET,ENCODER");
+                per={a,b}; encoder=c; producers=std::min(a,b); pool=(extra.empty()||ranges==0)?0:threads_;
+            } else { split_override("FASTGA_SHARED_NATIVE_SPLIT",producers,encoder); per={producers,producers}; pool=0; }
+        } else split_override("FASTGA_SHARED_NATIVE_SPLIT",producers,encoder);
+        bool sequential=*std::min_element(per.begin(),per.end())<1;
+        if (sequential) { per.assign(n,threads_); encoder=threads_; pool=0; }
+        std::vector<std::pair<std::string,int>> plan;
+        for (int i=0; i<n; ++i) plan.emplace_back(samples[i].at("sample").get<std::string>(),per[i]);
+        plan.emplace_back("merge",encoder);
+        allot("native-sort-stream",plan,!sequential,pool);
+        std::map<std::string,std::string> gate_environment;
+        sxgc_gate_t *gate=nullptr;
+        fs::path gate_file=work_/"budget.gate";
+        if (pool) {
+            fs::remove(gate_file);
+            gate=sxgc_gate_create(gate_file.c_str(),static_cast<unsigned>(pool));
+            gate_environment={{"SXGC_BUDGET_GATE",gate_file.string()}};
+        }
+        Command merge={(binary_/"gixshare").string(),"build-stream","-o",stage_.string(),"--storage",storage,
+                       "--threads",std::to_string(encoder)};
         if (ranges>=0) { merge.push_back("--ranges"); merge.push_back(std::to_string(ranges)); }
         if (!verifying_) report_["stream_ranges"]=ranges>=0?ranges:4096;
         merge.insert(merge.end(),extra.begin(),extra.end());
@@ -341,12 +375,17 @@ class FastaBuilder {
         }
         report_["stream_transport"]=sequential?"sequential-spool":"fifo";
         if (sequential) report_["spooled_seed_stream_bytes"]=uint64_t(0);
+        struct GateFile { // the gate lives for the stage: unmapped and removed on every exit
+            sxgc_gate_t *gate; fs::path file;
+            ~GateFile() { if (gate) { munmap(gate,sizeof(sxgc_gate_t)); std::error_code ignored; fs::remove(file,ignored); } }
+        } gate_guard{gate,gate_file};
         std::vector<size_t> ids;
-        if (!sequential) ids.push_back(start("merge",merge,logs_/"merge.json"));
+        if (!sequential) ids.push_back(start("merge",merge,logs_/"merge.json",gate_environment));
         for (size_t i=0; i<samples.size(); ++i) {
             auto name=samples[i].at("sample").get<std::string>();
             auto filter=(i==1)?target_filter:std::map<std::string,std::string>{};
-            auto id=start(name,producer(samples[i],"GIXmake-direct",producers),streams[i],filter);
+            filter.insert(gate_environment.begin(),gate_environment.end());
+            auto id=start(name,producer(samples[i],"GIXmake-direct",per[i]),streams[i],filter);
             if (sequential) {
                 wait({id});
                 report_["spooled_seed_stream_bytes"]=report_["spooled_seed_stream_bytes"].get<uint64_t>()+fs::file_size(streams[i]);
@@ -354,6 +393,18 @@ class FastaBuilder {
         }
         if (sequential) run("merge",merge,logs_/"merge.json");
         else wait(ids);
+        if (gate && !verifying_) {
+            // The gate counted every token holder of the three programs: the peak is the measured maximum of computing threads.
+            auto &entry=report_["thread_allocation"]["native-sort-stream"];
+            { // close the occupancy integral at the end of the stage
+                pthread_mutex_lock(&gate->m); uint64_t now=sxgc_gate_now(), dt=now-gate->last_ns; gate->last_ns=now;
+                gate->free_ns+=dt*gate->free_tokens; if (gate->hi_waiting+gate->lo_waiting) gate->free_waiting_ns+=dt*gate->free_tokens;
+                pthread_mutex_unlock(&gate->m); }
+            entry["peak_active"]=gate->peak; entry["grants"]=gate->grants;
+            entry["token_seconds_unused"]=gate->free_ns/1e9; entry["token_seconds_unused_while_a_thread_waited"]=gate->free_waiting_ns/1e9;
+            save();
+            if (gate->peak>static_cast<unsigned>(pool)) throw std::runtime_error("compute budget gate peaked at "+std::to_string(gate->peak)+" over its "+std::to_string(pool)+" tokens");
+        }
     }
     void joint() {
         const bool pfp=backend()=="pfp";

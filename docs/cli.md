@@ -33,12 +33,23 @@ in that directory. If omitted, `$TMPDIR` or the current directory is used.
 `-T` is a hard construction budget: at every stage the threads that compute in
 concurrently running programs sum to at most `-T` (threads that only wait, such
 as joins or blocked pipe writes, are not counted, as in upstream FastGA). The
-two mark passes run side by side with `T/2` threads each. Native sorting runs
-both producers with `P = max(1, T/12)` threads beside the stream consumer
-(`gixshare build-stream`) with `T-2P` threads (2/2/20 at `-T24`; the consumer
-needs about five times the CPU time of both sorters on the macaque pair, so it
-gets almost the whole budget; `FASTGA_SHARED_NATIVE_SPLIT=P,E` overrides the
-split and is still checked against `-T`); when that cannot give each a thread (`-T1`, `-T2`), raw seed
+two mark passes run side by side with `T/2` threads each. Native sorting of
+independent samples runs both producers with `P = max(1, T/12)` threads beside the
+stream consumer (`gixshare build-stream`) with `T-2P` threads (2/2/20 at `-T24`);
+`FASTGA_SHARED_NATIVE_SPLIT=P,E` overrides that split and is still checked against `-T`.
+The joint build (two samples, fused joint writer, the default) shares one pool of `T`
+compute tokens between the two sorters and the consumer instead, because the consumer is
+the bottleneck (about four times the CPU time of both sorters): the sorters work in bursts (the
+k-mer partition, then one sorted part at a time) and block on the full pipe in between.
+A sorter is `max(1, T/3)` threads wide and the consumer `T` wide (8/8/24 at `-T24`), but a
+thread computes only while it holds a token, which it hands back before every blocking wait
+(`src/sxgc_gate.h`, a counter in a shared-memory file that the builder passes to the programs
+through `SXGC_BUDGET_GATE`). Whichever side has work therefore uses the cores the other leaves
+idle, and the threads that compute at any moment never exceed `-T`: the gate records the peak
+number of token holders (`peak_active`) and the build fails if it exceeded `T`.
+`build.json` records the plan as `"schedule": "shared-pool"` with the pool size, the program widths
+and the measured peak. `FASTGA_SHARED_NATIVE_SPLIT=REFERENCE,TARGET,ENCODER` sets those program
+widths (each at most `-T`). When no thread is left for a producer (`-T1`, `-T2`), raw seed
 streams are spooled sequentially and every step uses the whole budget. PFP
 streams the suffix array from `pfbwt -t A` (A workers, its producing main thread
 and its ordered writer) into `pfp-emit` with `T-A-2` threads; below four threads
@@ -111,7 +122,11 @@ overrides the copy finder's occurrence cap (default 1000; measurements only).
 On the macaque pair at `-T24`, caps 256 and 1000 give 404.3M and 395.1M residual occurrences; the
 finder takes 79 s and 88 s but the index merge stage 525 s and 435 s (whole build 648 s and 566 s,
 index 13.067 GB and 13.034 GB), so 1000 is the default. A cap of 4096 lowers residuals to 382.3M but
-the finder alone then needs 261 s and 5500 core-seconds.
+the finder alone then needs 261 s and 5500 core-seconds. These macaque numbers predate the faster index merge
+(whose cost per residual row is now about a third). On the maize pair (standalone `joint-copy`, 24 threads,
+later code) caps 100, 300 and 1000 take 50 s, 54 s and 76 s and leave 513.3M, 493.3M and 486.7M residual
+occurrences (+5.5%, +1.3%, 0%); the index bytes of the capped runs were not measured. The default stays 1000
+because it never enlarges the index relative to the exhaustive result.
 PFP sorting needs at least two threads and streams the full DNA suffix array
 through a FIFO. The public bundle appears only after construction passes. The
 complete successful JSON report is on stdout; diagnostics are on stderr.

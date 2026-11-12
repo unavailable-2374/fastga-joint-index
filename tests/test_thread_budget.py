@@ -61,6 +61,7 @@ def check(manifest, threads, label):
         raise RuntimeError(f'{label}: recorded budget {build["total_thread_budget"]} != -T{threads}')
     plan = build['thread_allocation']
     commands = {row['name']: row['command'] for row in build['commands']}
+    commands_env = {row['name']: row.get('environment', {}) for row in build['commands']}
     stages = {}
     for stage, entry in plan.items():
         used = [computing_threads(commands[name]) for name in entry['programs'] if name in commands]
@@ -70,6 +71,16 @@ def check(manifest, threads, label):
             raise RuntimeError(f'{label}: stage {stage} lists programs that never ran: {entry["programs"]}')
         if used != list(entry['programs'].values()):
             raise RuntimeError(f'{label}: stage {stage} plan {entry["programs"]} differs from the programs\' flags {used}')
+        if entry['schedule'] == 'shared-pool':
+            # The programs share one pool of -T compute tokens: no program is wider than -T, all of them are attached to the
+            # same gate, and the peak of token holders the gate measured (the computing threads) stays within the pool.
+            gates = {commands_env[name].get('SXGC_BUDGET_GATE') for name in entry['programs']}
+            if entry['total'] != threads or max(used) > threads or len(gates) != 1 or None in gates:
+                raise RuntimeError(f'{label}: stage {stage} shared-pool plan {used} is inconsistent under -T{threads}')
+            if not 1 <= entry['peak_active'] <= threads or entry['grants'] < 1:
+                raise RuntimeError(f'{label}: stage {stage} computed with {entry.get("peak_active")} threads under -T{threads}')
+            stages[stage] = entry['peak_active']
+            continue
         total = sum(used) if entry['schedule'] == 'concurrent' else max(used)
         if total != entry['total'] or total > threads:
             raise RuntimeError(f'{label}: stage {stage} computes with {total} threads under -T{threads}')
@@ -110,6 +121,7 @@ def main():
                      ('native', 24, {'FASTGA_SHARED_NATIVE_SPLIT': '11,2'}),
                      # the range readers are threads inside gixshare's --threads (side_threads), also when no pool worker is left
                      ('native', 24, {'FASTGA_SHARED_NATIVE_SPLIT': '10,3'}),
+                     ('native', 24, {'FASTGA_SHARED_NATIVE_SPLIT': '5,7,24'}),
                      ('native', 24, {'FASTGA_SHARED_STREAM_RANGES': '0'}),
                      ('native', 5, {'FASTGA_SHARED_STREAM_RANGES': '7'}),
                      ('pfp', 24, {'FASTGA_SHARED_PFP_SPLIT': '0,23'}),
@@ -129,8 +141,9 @@ def main():
                 if len(manifests) != 1:
                     raise RuntimeError(f'{label}: expected one retained build.json, found {manifests}')
                 report['runs'].append(dict(label=label, stages=check(manifests[0], threads, label)))
-            for variable, value in (('FASTGA_SHARED_NATIVE_SPLIT', '12,1'), ('FASTGA_SHARED_PFP_SPLIT', '20,3')):
-                work = root/('over-'+variable)
+            for variable, value in (('FASTGA_SHARED_NATIVE_SPLIT', '12,1'), ('FASTGA_SHARED_NATIVE_SPLIT', '25,1,24'),
+                                    ('FASTGA_SHARED_PFP_SPLIT', '20,3')):
+                work = root/('over-'+variable+'-'+value.replace(',', '_'))
                 work.mkdir()
                 run([binary/'FastGA-shared', '--index-backend', 'pfp' if 'PFP' in variable else 'native', '-T24', '-pafx', *inputs],
                     work, {variable: value}, error='over the -T budget of 24')

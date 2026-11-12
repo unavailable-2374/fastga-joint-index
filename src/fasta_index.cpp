@@ -1,6 +1,7 @@
 #include "fasta_builder.hpp"
 #include <regex>
 #include <set>
+#include "stdout_guard.hpp"
 
 namespace fg {
 void index_help() {
@@ -153,6 +154,7 @@ int main(int argc, char **argv) {
     action.sa_handler=[](int signal) { fg::interrupted_signal=signal; };
     sigemptyset(&action.sa_mask);
     sigaction(SIGTERM,&action,nullptr); sigaction(SIGINT,&action,nullptr); sigaction(SIGPIPE,&action,nullptr);
+    sjio::guard_stdout("GIXmake-shared");
     try { return fg::index_main(argc,argv); }
     catch (const fg::Interrupted &error) { std::cerr<<"GIXmake-shared: "<<error.what()<<'\n'; return 128+error.number; }
     catch (const std::exception &error) { std::cerr<<"GIXmake-shared: "<<error.what()<<'\n'; return 1; }

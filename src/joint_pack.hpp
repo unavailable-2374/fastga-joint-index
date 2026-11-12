@@ -3,13 +3,27 @@
 void joint_order_block(Writer&w,const Bytes&raw,unsigned n){
     if(!n)return;std::vector<unsigned char>origin(n);std::vector<uint64_t>weight(n);size_t at=0;
     for(unsigned i=0;i<n;++i){origin[i]=take(raw,at)!=0;weight[i]=take(raw,at);}
-    if(at!=raw.size())fail("trailing joint weight input");w.block(joint_order_raw(origin.data(),weight.data(),n),n);
+    if(at!=raw.size())fail("trailing joint weight input");std::vector<unsigned char>lcp(n); // wire-format oracle input: panel breaks only
+    w.block(joint_order_raw(origin.data(),weight.data(),lcp.data(),n),n);
 }
-// Copies the payload blocks of a v3 archive into a template archive. Blocks are
-// read in large contiguous runs; the bytes written are those of a block-by-block copy.
+// Writes the template archive of a v3 joint-template archive: version 5 re-encodes each
+// block as bit-packed coordinates; version 4 (domain too wide) copies blocks in large runs.
 void joint_compact_write(const fs::path&temporary,const Shared&source){
-    Writer out(temporary,TEMPLATE_MAGIC,10);out.h=source.a.h;memcpy(out.h.data(),TEMPLATE_MAGIC,8);put32(out.h.data()+8,4);
-    const auto&blocks=source.a.blocks;constexpr uint64_t RUN=16u<<20;
+    auto&m=source.m;
+    Writer out(temporary,TEMPLATE_MAGIC,10);out.h=source.a.h;memcpy(out.h.data(),TEMPLATE_MAGIC,8);
+    // Version 5 re-encodes every block as bit-packed global coordinates (same bytes as the direct writer).
+    std::vector<uint64_t>lengths;
+    if(source.source){lengths=contig_lengths_by_rank(*source.source,m.perm);out.domain=sxgc_positions::Domain::make(lengths);}
+    put32(out.h.data()+8,out.domain?5:4);
+    const auto&blocks=source.a.blocks;
+    if(out.domain){
+        for(size_t i=0;i<blocks.size();++i){
+            auto raw=sxgc_positions::unpack(source.a.decode(i),blocks[i].codec,blocks[i].count,m.post,m.cont);
+            auto p=sxgc_positions::pack(raw,blocks[i].count,m.post,m.cont,out.domain.get());
+            auto c=crc(p.raw);out.append(Encoded{std::move(p.raw),std::move(p.packed),c,p.codec,p.legacy_bytes},blocks[i].count);out.count+=blocks[i].count;
+        }
+    }else{
+    constexpr uint64_t RUN=16u<<20;
     for(size_t i=0;i<blocks.size();){
         size_t j=i+1;uint64_t first=blocks[i].off,end=first+blocks[i].packed;
         while(j<blocks.size()&&blocks[j].off==end&&end+blocks[j].packed-first<=RUN){end+=blocks[j].packed;++j;}
@@ -17,7 +31,9 @@ void joint_compact_write(const fs::path&temporary,const Shared&source){
         for(size_t k=i;k<j;++k){auto block=blocks[k];block.off=base+(block.off-first);out.blocks.push_back(block);out.count+=block.count;}
         write(f,run.data(),run.size());i=j;
     }
-    auto&m=source.m;Bytes meta(24+uint64_t(m.ncontig)*4);put32(meta.data(),40);put32(meta.data()+4,m.post);put32(meta.data()+8,m.cont);put32(meta.data()+12,m.ncontig);put64(meta.data()+16,out.count);for(int i=0;i<m.ncontig;++i)put32(meta.data()+24+4*i,m.perm[i]);
+    }
+    Bytes meta(24+uint64_t(m.ncontig)*4);put32(meta.data(),40);put32(meta.data()+4,m.post);put32(meta.data()+8,m.cont);put32(meta.data()+12,m.ncontig);put64(meta.data()+16,out.count);for(int i=0;i<m.ncontig;++i)put32(meta.data()+24+4*i,m.perm[i]);
+    if(out.domain)for(auto length:lengths)varint(meta,length);
     auto packed=sxgc_positions::compress(meta);put64(out.h.data()+48,ftello(out.file()));put64(out.h.data()+56,packed.size());put64(out.h.data()+64,meta.size());put32(out.h.data()+72,crc(meta));write(out.file(),packed.data(),packed.size());out.finish();
 }
 // One sorted input of the merge: 40-mer keys as (bytes 0-7, bytes 8-9) big-endian
@@ -49,7 +65,7 @@ public:
     PackFeed(std::shared_ptr<Shared>s,const jc::Intervals*t,size_t w):shared(std::move(s)),tree(t),nblocks(shared->a.blocks.size()),window(w){
         if(shared->m.kmer!=40||shared->m.ibyte!=3)fail("joint pack needs 40-mer streams with a 3-byte prefix");
     }
-    ~PackFeed(){for(auto&f:queue)if(f.valid())f.wait();}
+    ~PackFeed(){GateRelease idle;for(auto&f:queue)if(f.valid())f.wait();}
     // Moves to the next block; false once the input is exhausted.
     bool load(){fill();if(queue.empty()){block.reset();return false;}block=queue.front().get();queue.pop_front();at=0;fill();return true;}
     bool step(){return ++at<block->keys.size()||load();}
@@ -71,20 +87,29 @@ void joint_pack(const fs::path&root,const std::string&an,const std::string&bn,co
     // for the copies, which read this frame's archives and paths.
     struct Join{std::future<void>&a,&b;~Join(){for(auto*f:{&a,&b})if(f->valid())f->wait();}}join{compact_a,compact_b};
     if(parallel){compact_a=spawn([&]{joint_compact_write(reference_partial,*as);});compact_b=spawn([&]{joint_compact_write(residual_partial,*bs);});}
-    Writer order(root/"joint.order",ORDER_MAGIC,10);put32(order.h.data()+76,1);std::vector<JointDirectory>dir;std::vector<int64>bc(1u<<24);uint64_t ar=0,br=0,ac=0,bt=0;unsigned n=0;
-    struct OrderRows{std::vector<unsigned char>origin=std::vector<unsigned char>(BLOCK);std::vector<uint64_t>weight=std::vector<uint64_t>(BLOCK);};
+    Writer order(root/"joint.order",ORDER_MAGIC,10);put32(order.h.data()+76,2);std::vector<JointDirectory>dir;std::vector<int64>bc(1u<<24);uint64_t ar=0,br=0,ac=0,bt=0;unsigned n=0;
+    struct OrderRows{std::vector<unsigned char>origin=std::vector<unsigned char>(BLOCK),lcp=std::vector<unsigned char>(BLOCK);std::vector<uint64_t>weight=std::vector<uint64_t>(BLOCK);};
     auto rows=std::make_shared<OrderRows>();
     auto flush=[&]{auto block=std::move(rows);rows=std::make_shared<OrderRows>();unsigned count=n;n=0;
-        order.submit([block,count]{auto raw=joint_order_raw(block->origin.data(),block->weight.data(),count);auto packed=sxgc_positions::compress(raw);auto c=crc(raw);return Encoded{std::move(raw),std::move(packed),c,0,0};},count);};
+        order.submit([block,count]{auto raw=joint_order_raw(block->origin.data(),block->weight.data(),block->lcp.data(),count);auto packed=sxgc_positions::compress(raw);auto c=crc(raw);return Encoded{std::move(raw),std::move(packed),c,0,0};},count);};
     {
         size_t window=std::max<size_t>(2,encode_threads);PackFeed a(as,&tree,window),b(bs,nullptr,window);bool more_a=a.load(),more_b=b.load();
+        PackRow previous{0,0};bool have_key=false;
         while(more_a||more_b){if(!n)dir.push_back({ar,br,ac,bt});
             bool fromA=!more_b||(more_a&&(a.row().hi!=b.row().hi?a.row().hi<b.row().hi:a.row().lo<=b.row().lo));
             const PackRow&key=fromA?a.row():b.row();uint64_t weight=1;
             if(fromA){weight=a.weight();++ar;++ac;}else ++br;
             auto prefix=key.hi>>40;
             if(weight>uint64_t(INT64_MAX)-bt||weight>uint64_t(INT64_MAX)-bc[prefix])fail("joint frequency overflow");bc[prefix]+=weight;bt+=weight;
-            rows->origin[n]=fromA?0:1;rows->weight[n]=weight;if(++n==BLOCK)flush();
+            rows->origin[n]=fromA?0:1;rows->weight[n]=weight;
+            { // LCP code to the previous row, from the 80-bit keys (bytes 0-7 in hi, 8-9 in lo)
+                unsigned code=0;
+                if(have_key){uint64_t x=key.hi^previous.hi;unsigned bases;
+                    if(x)bases=__builtin_clzll(x)/2;else{unsigned y=unsigned(key.lo^previous.lo)<<16;bases=y?32+__builtin_clz(y)/2:40;}
+                    code=bases<12?0:bases;}
+                rows->lcp[n]=uint8_t(code);previous=key;have_key=true;
+            }
+            if(++n==BLOCK)flush();
             if(fromA)more_a=a.step();else more_b=b.step();
         }
     }
@@ -146,9 +171,15 @@ void joint_check_seek(const fs::path&p){
         for(auto*stream:{s.get(),clone.get()}){sxgc_stream_seek(stream,selected[i]);auto&record=expected[i];if(stream->cpre!=int(u32(record.data()))||memcmp(record.data()+4,stream->csuf,stream->pbyte))fail("joint seek/clone disagrees with sequential decode");}
         if(sxgc_stream_is_joint(s.get())&&(i%17==0||selected[i]%BLOCK<=1||selected[i]%BLOCK==BLOCK-1)){
             auto start=selected[i],count=std::min<uint64_t>(17,total-start);Bytes want(count*s->pbyte),actual(want.size());
-            for(uint64_t j=0;j<count;++j){sxgc_stream_seek(s.get(),start+j);memcpy(want.data()+j*s->pbyte,s->csuf,s->pbyte);want[j*s->pbyte+8]=0;}
+            for(uint64_t j=0;j<count;++j){sxgc_stream_seek(s.get(),start+j);memcpy(want.data()+j*s->pbyte,s->csuf,s->pbyte);memset(want.data()+j*s->pbyte,0,7);want[j*s->pbyte+8]=0;}
             sxgc_joint_fetch_range(clone.get(),start,count,actual.data());
             if(actual!=want)fail("joint batch restore differs from sequential decode");
+            {   // Same rows through the prefix-panel descriptors: walk the compact panel, then locate (fresh stream: no lookaside).
+                sxgc_stream_seek(s.get(),start);auto fresh=std::unique_ptr<Kmer_Stream,decltype(&sxgc_stream_free)>(sxgc_stream_clone(s.get()),sxgc_stream_free);unsigned char*compact=nullptr;
+                if(sxgc_joint_prefix(fresh.get(),s->cpre,&compact)<0)fail("joint panel prefix failed");
+                Bytes panel(want.size());sxgc_joint_fetch_range(fresh.get(),start,count,panel.data());
+                if(panel!=want)fail("joint prefix-panel locate differs from sequential decode");
+            }
             for(uint64_t j=count;j-->0;){Bytes one(s->pbyte);sxgc_joint_fetch(s.get(),start+j,one.data());if(memcmp(one.data(),want.data()+j*s->pbyte,s->pbyte))fail("joint scalar restore differs from batch oracle");}
             batch_rows+=count;
         }

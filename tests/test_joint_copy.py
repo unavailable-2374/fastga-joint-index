@@ -70,15 +70,42 @@ def fixture():
 
 
 def read_copies(path):
+    """Independent SXGCOPY5 decoder: six field streams, each deflated on its own."""
     raw = Path(path).read_bytes()
-    assert raw[:8] == b'SXGCOPY4'
+    assert raw[:8] == b'SXGCOPY5'
     n, nbytes, packed, crc = struct.unpack('<QQQI', raw[8:36])
-    body = zlib.decompress(raw[36:36 + packed])
-    assert len(body) == nbytes == 33 * n and zlib.crc32(body) == crc
-    rows = []
+    streams, at = [], 36
+    for _ in range(6):
+        rlen, plen = struct.unpack('<QQ', raw[at:at + 16]); at += 16
+        body = zlib.decompress(raw[at:at + plen]); at += plen
+        assert len(body) == rlen
+        streams.append(body)
+    assert at == len(raw) and packed == len(raw) - 36
+    assert nbytes == sum(len(s) for s in streams) and zlib.crc32(b''.join(streams)) == crc
+    pos = [0] * 6
+
+    def varint(k):
+        v, shift = 0, 0
+        while True:
+            c = streams[k][pos[k]]; pos[k] += 1
+            v |= (c & 127) << shift; shift += 7
+            if not c & 128:
+                return v
+
+    def unzig(z):
+        return (z >> 1) ^ -(z & 1)
+    rows, a, b, end, xend = [], 0, 0, 0, 0
+    M = (1 << 64) - 1
     for i in range(n):
-        a, b, x, y, ln, reverse = struct.unpack('<IIQQQB', body[33 * i:33 * (i + 1)])
+        a += unzig(varint(0)); db = varint(1); reverse = streams[2][i]; gap = varint(3)
+        same = i > 0 and db == 0
+        b += db
+        y = end + gap if same else gap
+        x = (xend + gap + unzig(varint(4))) & M
+        ln = varint(5)
         rows.append((a, b, x, y, ln, reverse))
+        end, xend = y + ln, x + ln
+    assert all(pos[k] == len(streams[k]) for k in (0, 1, 3, 4, 5)) and len(streams[2]) == n
     return rows
 
 

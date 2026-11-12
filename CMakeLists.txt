@@ -173,6 +173,9 @@ if(BUILD_TESTING)
     target_link_libraries(pfbwt-dict-test PRIVATE OpenMP::OpenMP_CXX)
   endif()
   add_test(NAME pfbwt-dict COMMAND pfbwt-dict-test)
+  add_executable(gate-test "${PROJECT_SOURCE_DIR}/tests/test_gate.cpp")
+  sj_program(gate-test)
+  add_test(NAME compute-gate COMMAND gate-test "${CMAKE_BINARY_DIR}/test-results/tmp/budget-test.gate")
   set_tests_properties(codec PROPERTIES ENVIRONMENT "SXGC_VERIFY_TMPDIR=${CMAKE_BINARY_DIR}/test-results/tmp;ASAN_OPTIONS=detect_leaks=0;UBSAN_OPTIONS=halt_on_error=1")
 endif()
 if(SJ_PYTHON_TESTS)
@@ -202,6 +205,8 @@ if(SJ_PYTHON_TESTS)
     --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/index-cli.json")
   set_tests_properties(native-index-cli PROPERTIES
     ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0;UBSAN_OPTIONS=halt_on_error=1")
+  add_test(NAME write-errors COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_write_errors.py"
+    --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/write-errors.json")
   add_test(NAME construction-comparison COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_construction.py"
     --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/construction.json")
 endif()

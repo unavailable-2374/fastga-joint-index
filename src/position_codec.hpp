@@ -5,6 +5,7 @@
 #define SXGC_POSITION_CODEC_HPP
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -16,7 +17,7 @@
 namespace sxgc_positions {
 using Bytes = std::vector<unsigned char>;
 constexpr unsigned MAX_ROWS = 4096;
-enum Codec : unsigned { LEGACY = 0, COLUMNS = 1, TEMPLATES = 2 };
+enum Codec : unsigned { LEGACY = 0, COLUMNS = 1, TEMPLATES = 2, PACKED = 3 };
 [[noreturn]] inline void fail(const char *message) {
     throw std::runtime_error(std::string("position codec: ") + message);
 }
@@ -52,6 +53,138 @@ inline uint64_t zigzag(uint64_t delta) {
 }
 inline uint64_t unzigzag(uint64_t code) {
     return (code >> 1) ^ (uint64_t(0) - (code & 1));
+}
+// ---- PACKED codec: fixed-width bit packing of global oriented coordinates ----
+// One W-bit value per row: strand * D + start[contig rank] + position. The contigs
+// of one strand occupy consecutive ranges of length+1 values (a reverse row's
+// position is its end, so 0..length are all possible) and D is their total.
+// W = ceil(log2(2D)) follows from the contig lengths alone, so an archive only
+// records those. Block bytes are the bit stream itself (little-endian, row i at
+// bit i*W) with no entropy stage: positions in key order are a random permutation
+// and zlib gains nothing on them (measured).
+struct Domain {
+    static constexpr unsigned MAX_WIDTH = 57;      // one unaligned 64-bit load per row
+    unsigned width = 0, shift = 0;
+    bool single = false;                           // no bucket holds two contig starts
+    uint64_t strand = 0;                           // D: values per strand
+    std::vector<uint64_t> start;                   // ncontig+1 offsets inside one strand
+    std::vector<uint32_t> bucket;                  // contig rank holding value b<<shift
+    // lengths are indexed by contig rank. Returns null when packing is impossible.
+    static std::shared_ptr<const Domain> make(const std::vector<uint64_t> &lengths) {
+        if (lengths.empty() || lengths.size() >= UINT32_MAX) return nullptr;
+        auto d = std::make_shared<Domain>(); d->start.assign(lengths.size()+1, 0);
+        for (size_t r = 0; r < lengths.size(); ++r) {
+            if (lengths[r] >= (uint64_t(1) << 56) || d->start[r] >= (uint64_t(1) << 56)) return nullptr;
+            d->start[r+1] = d->start[r] + lengths[r] + 1;
+        }
+        d->strand = d->start.back();
+        d->width = 64 - __builtin_clzll(2*d->strand - 1);
+        if (d->width > MAX_WIDTH) return nullptr;
+        unsigned bits = 64 - __builtin_clzll(d->strand);
+        d->shift = bits > 16 ? bits - 16 : 0;
+        size_t buckets = ((d->strand - 1) >> d->shift) + 1, r = 0;
+        d->bucket.resize(buckets+1);
+        for (size_t b = 0; b < buckets; ++b) {
+            uint64_t u = uint64_t(b) << d->shift;
+            while (d->start[r+1] <= u) ++r;
+            d->bucket[b] = r;
+        }
+        d->bucket[buckets] = lengths.size()-1;
+        d->single = true;
+        for (size_t b = 0; b < buckets; ++b) d->single &= d->bucket[b+1] - d->bucket[b] <= 1;
+        return d;
+    }
+    unsigned ncontig() const { return start.size()-1; }
+    // rank with start[rank] <= u < start[rank+1]; requires u < strand.
+    unsigned rank_of(uint64_t u) const {
+        size_t b = u >> shift; unsigned lo = bucket[b];
+        if (single) return lo + (start[lo+1] <= u);   // branch-free: at most one start inside the bucket
+        unsigned hi = bucket[b+1];
+        if (hi - lo > 8) return std::upper_bound(start.begin()+lo+1, start.begin()+hi+1, u) - start.begin() - 1;
+        while (lo < hi && start[lo+1] <= u) ++lo;
+        return lo;
+    }
+};
+inline uint64_t load64(const unsigned char *p) { uint64_t v; memcpy(&v, p, 8); return v; }
+inline size_t packed_size(unsigned n, unsigned width) { return (size_t(n)*width + 7) / 8; }
+// Packs canonical joint rows (zero id varint, mask and LCP). False when a row does
+// not fit (nonzero bookkeeping fields or a coordinate outside the domain); the
+// caller then uses the compressed codecs.
+inline bool pack_coordinates(const Bytes &raw, unsigned n, unsigned post, unsigned cont,
+                             const Domain &dom, Bytes &out) {
+    dimensions(n, post, cont);
+    const unsigned width = post+cont+3;
+    if (raw.size() != size_t(n)*width) return false;
+    out.assign(packed_size(n, dom.width) + 8, 0);
+    unsigned __int128 acc = 0; unsigned nbits = 0; size_t at = 0;
+    const uint64_t strand_bit = uint64_t(1) << (8*cont-1);
+    const unsigned char *p = raw.data();
+    for (unsigned i = 0; i < n; ++i, p += width) {
+        if (p[0] | p[1] | p[2]) return false;
+        uint64_t pos = number(p+3, post), rank = number(p+3+post, cont);
+        bool reverse = rank & strand_bit; rank &= ~strand_bit;
+        if (rank >= dom.ncontig() || pos >= dom.start[rank+1]-dom.start[rank]) return false;
+        uint64_t v = (reverse ? dom.strand : 0) + dom.start[rank] + pos;
+        acc |= (unsigned __int128)v << nbits; nbits += dom.width;
+        if (nbits >= 64) { memcpy(out.data()+at, &acc, 8); at += 8; acc >>= 64; nbits -= 64; }
+    }
+    if (nbits) memcpy(out.data()+at, &acc, 8);
+    out.resize(packed_size(n, dom.width));
+    return true;
+}
+template<unsigned LEAD>
+inline void decode_coordinates_impl(const unsigned char *in, size_t length, unsigned n, unsigned post,
+                                    unsigned cont, const Domain &dom, unsigned char *out) {
+    const unsigned stride = post+cont+2+LEAD, tail = 8/stride + 2;
+    const unsigned fast = n > tail ? n - tail : 0;
+    const uint64_t mask = (uint64_t(1) << dom.width) - 1, D = dom.strand;
+    const uint64_t strand_bit = uint64_t(1) << (8*cont-1);
+    const uint64_t *start = dom.start.data();
+    const unsigned width = dom.width;
+    uint64_t invalid = 0;
+    unsigned i = 0;
+    // Rows whose 8-byte load and 8-byte stores stay inside both buffers.
+    const unsigned load_safe = length >= 8 ? unsigned(std::min<uint64_t>(n, ((length-8)*8)/width + 1)) : 0;
+    const unsigned limit = std::min(fast, load_safe);
+    for (; i < limit; ++i) {
+        size_t bit = size_t(i)*width;
+        uint64_t x = (load64(in+(bit>>3)) >> (bit & 7)) & mask;
+        invalid |= (x >= 2*D);
+        uint64_t reverse = x >= D, u = x - (reverse ? D : 0);
+        unsigned rank = dom.rank_of(u < D ? u : D-1); // out-of-domain values are flagged and rejected below
+        uint64_t pos = u - start[rank], rk = rank | (reverse ? strand_bit : 0);
+        unsigned char *p = out + size_t(i)*stride;
+        invalid |= (post < 8 && (pos >> (8*post)) != 0);
+        memset(p, 0, LEAD+2);
+        memcpy(p+LEAD+2, &pos, 8); memcpy(p+LEAD+2+post, &rk, 8);
+    }
+    for (; i < n; ++i) {
+        size_t bit = size_t(i)*width, byte = bit >> 3; uint64_t x = 0;
+        if (byte + 8 <= length) x = load64(in+byte); else memcpy(&x, in+byte, length-byte);
+        x = (x >> (bit & 7)) & mask;
+        invalid |= (x >= 2*D);
+        uint64_t reverse = x >= D, u = x - (reverse ? D : 0);
+        unsigned rank = dom.rank_of(u < D ? u : D-1); // out-of-domain values are flagged and rejected below
+        uint64_t pos = u - start[rank], rk = rank | (reverse ? strand_bit : 0);
+        unsigned char *p = out + size_t(i)*stride;
+        invalid |= (post < 8 && (pos >> (8*post)) != 0);
+        memset(p, 0, LEAD+2); p += LEAD;
+        for (unsigned j = 0; j < post; ++j) p[2+j] = pos >> (8*j);
+        for (unsigned j = 0; j < cont; ++j) p[2+post+j] = rk >> (8*j);
+    }
+    require(!invalid, "packed coordinate outside domain");
+}
+// Writes n rows of [lead zero bytes][mask 0][lcp 0][post][cont]; lead is 1 for the
+// canonical form (zero id varint) and 0 for the reader's csize-wide rows. Whole
+// 8-byte stores run while a row has 8 bytes of room behind it; the last rows use
+// byte stores.
+inline void decode_coordinates(const unsigned char *in, size_t length, unsigned n, unsigned post,
+                               unsigned cont, const Domain &dom, unsigned char *out, unsigned lead) {
+    dimensions(n, post, cont);
+    require(length == packed_size(n, dom.width), "packed block length mismatch");
+    require(lead <= 1, "invalid packed lead");
+    if (lead) decode_coordinates_impl<1>(in, length, n, post, cont, dom, out);
+    else decode_coordinates_impl<0>(in, length, n, post, cont, dom, out);
 }
 struct Rows {
     std::vector<uint64_t> ids;
@@ -141,9 +274,16 @@ inline Bytes templates(const Rows &rows, unsigned post, unsigned cont) {
     for (unsigned ref : refs) varint(out, ref);
     return out;
 }
-inline Bytes unpack(const Bytes &raw, unsigned codec, unsigned n, unsigned post, unsigned cont) {
+inline Bytes unpack(const Bytes &raw, unsigned codec, unsigned n, unsigned post, unsigned cont,
+                    const Domain *domain = nullptr) {
     dimensions(n, post, cont);
     if (codec == LEGACY) return raw;
+    if (codec == PACKED) {
+        require(domain, "packed block without a coordinate domain");
+        Bytes out(size_t(n)*(post+cont+3));
+        decode_coordinates(raw.data(), raw.size(), n, post, cont, *domain, out.data(), 1);
+        return out;
+    }
     unsigned width = post+cont+2;
     Rows rows; rows.ids.reserve(n); rows.payload.resize(size_t(n)*width);
     size_t at = 0;
@@ -232,7 +372,14 @@ inline bool inflate_exact(unsigned char *out, size_t size, const unsigned char *
     return libdeflate_zlib_decompress(z.d, in, length, out, size, nullptr) == LIBDEFLATE_SUCCESS;
 }
 struct Packed { Bytes raw, packed; unsigned codec; size_t legacy_bytes; };
-inline Packed pack(const Bytes &raw, unsigned n, unsigned post, unsigned cont) {
+// With a domain, joint rows are stored bit-packed: codec PACKED, Packed::raw holds the
+// stored bytes and Packed::packed stays empty. Other rows use the compressed codecs.
+inline Packed pack(const Bytes &raw, unsigned n, unsigned post, unsigned cont,
+                   const Domain *domain = nullptr) {
+    if (domain) {
+        Bytes bits;
+        if (pack_coordinates(raw, n, post, cont, *domain, bits)) return Packed{std::move(bits), {}, PACKED, 0};
+    }
     auto rows = parse(raw, n, post, cont);
     Packed best{raw, compress(raw), LEGACY, 0}; best.legacy_bytes = best.packed.size();
     for (unsigned codec : {unsigned(COLUMNS), unsigned(TEMPLATES)}) {

@@ -11,9 +11,9 @@ inline uint32_t file_crc(const unsigned char *data,uint64_t size){
     for(unsigned i=0;i<parts;++i){uint64_t from=std::min<uint64_t>(size,i*chunk),to=std::min<uint64_t>(size,from+chunk);lens[i]=to-from;
         if(i)parts_done.push_back(spawn([&,i,from,to]{sums[i]=run(from,to);}));}
     // Waits only for parts still owned here: get() has already released the others.
-    struct Join{std::vector<std::future<void>>&d;~Join(){for(auto&f:d)if(f.valid())f.wait();}}join{parts_done};
+    struct Join{std::vector<std::future<void>>&d;~Join(){GateRelease idle;for(auto&f:d)if(f.valid())f.wait();}}join{parts_done};
     sums[0]=run(0,lens[0]);
-    for(auto &done:parts_done)done.get();
+    {GateRelease idle;for(auto &done:parts_done)done.get();}
     uLong total=sums[0];for(unsigned i=1;i<parts;++i)total=crc32_combine(total,sums[i],lens[i]);
     return total;
 }
@@ -72,6 +72,12 @@ struct SourceKeys {
         if(reverse){out[0]=(tail>>8)^255;out[1]=tail^255;put64(out.data()+2,__builtin_bswap64(head)^UINT64_MAX);}
         else{put64(out.data(),pair_order(head));auto last=pair_order(tail);out[8]=last;out[9]=last>>8;}
     }
+    // Hint the cache lines key_at() will read for a 40-mer; no bounds failure here, key_at validates later.
+    void prefetch_key(uint64_t contig,uint64_t pos,bool reverse)const{
+        if(contig>=contigs.size()||(reverse&&pos<40))return;
+        const auto &c=contigs[contig];uint64_t start=reverse?pos-40:pos;
+        const unsigned char*p=bps.data+uint64_t(c.boff)+start/4;__builtin_prefetch(p,0,1);__builtin_prefetch(p+10,0,1);
+    }
     void key_at(uint64_t contig,uint64_t pos,bool reverse,unsigned kmer,Bytes &out)const{
         if(contig>=contigs.size())fail("source key refers to an invalid/padded contig");
         const auto &c=contigs[contig];uint64_t length=c.clen;
@@ -95,6 +101,13 @@ struct SourceKeys {
         }
     }
 };
+// Contig lengths indexed by GIX contig rank (padding ranks have length 0); they fix
+// the packed coordinate domain of joint archives.
+inline std::vector<uint64_t> contig_lengths_by_rank(const SourceKeys &s,const std::vector<int> &perm){
+    std::vector<uint64_t> lengths(perm.size(),0);
+    for(size_t r=0;r<perm.size();++r)if(perm[r]>=0&&size_t(perm[r])<s.contigs.size())lengths[r]=s.contigs[perm[r]].clen;
+    return lengths;
+}
 struct SourceCheck {
     SourceKeys source;Metadata coordinates;Bytes restored;
     SourceCheck(Writer &writer,unsigned k,unsigned post,unsigned cont,const std::vector<int> &perm):source(writer.identity){
@@ -108,7 +121,14 @@ struct SourceCheck {
     // rows holds n consecutive key+payload records starting at row first; const for encoder threads.
     void verify_rows(const Bytes &rows,uint64_t first,uint32_t n,unsigned kbytes,unsigned csize)const{
         Bytes restored;size_t width=kbytes+csize;
-        for(uint32_t i=0;i<n;++i){auto p=rows.data()+i*width;source.key(coordinates,p+kbytes,restored);
+        // Every row reads its own 40-mer from the packed bases at a random place: prefetch the lines PF rows ahead (pure scheduling).
+        constexpr uint32_t PF=12;
+        auto touch=[&](uint32_t j){
+            const unsigned char*payload=rows.data()+j*width+kbytes;uint64_t pos=sxgc_positions::number(payload+2,coordinates.post),rank=0;
+            for(int b=0;b<coordinates.cont;++b){unsigned v=payload[2+coordinates.post+b];if(b==coordinates.cont-1)v&=127;rank|=uint64_t(v)<<(8*b);}
+            if(rank<coordinates.perm.size())source.prefetch_key(coordinates.perm[rank],pos,bool(payload[coordinates.csize-1]&128));};
+        for(uint32_t j=0;j<PF&&j<n;++j)touch(j);
+        for(uint32_t i=0;i<n;++i){if(i+PF<n)touch(i+PF);auto p=rows.data()+i*width;source.key(coordinates,p+kbytes,restored);
             if(restored.size()!=kbytes||memcmp(restored.data(),p,kbytes))fail("source key/position disagreement at row "+std::to_string(first+i));}
     }
 };

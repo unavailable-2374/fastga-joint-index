@@ -7,6 +7,7 @@ struct JointRankBlock {
     std::array<uint64_t,WORDS> origin{},positive{},heavy{};
     std::array<uint32_t,WORDS+1> references{},positives{},heavies{};
     std::vector<uint64_t> large,extra{0};
+    std::vector<uint8_t> lcp; // codec 2: LCP code per row (0 = panel start, else 12..40); empty for codec 1
     static uint64_t low(unsigned n){return n==64?UINT64_MAX:n?(uint64_t(1)<<n)-1:0;}
     static unsigned pop(uint64_t x){return __builtin_popcountll(x);}
     bool bit(const std::array<uint64_t,WORDS>&plane,unsigned i)const{return (plane[i/64]>>(i%64))&1;}
@@ -14,7 +15,7 @@ struct JointRankBlock {
     JointRankBlock(const Bytes&raw,unsigned n,unsigned codec):count(n),words((n+63)/64){
         if(!n||n>BLOCK)fail("invalid joint weight block row count");
         size_t at=0;
-        if(codec==1){
+        if(codec==1||codec==2){
             size_t plane=(n+7)/8;
             if(raw.size()<plane*2+1)fail("truncated joint weight bitplanes");
             for(unsigned word=0;word<words;++word){
@@ -33,6 +34,11 @@ struct JointRankBlock {
                 auto weight=take(raw,at);
                 if(index>=n||weight<2||weight>INT64_MAX||bit(origin,index)||!bit(positive,index))fail("invalid joint weight exception");
                 set(heavy,index);large.push_back(weight);
+            }
+            if(codec==2){
+                lcp.resize(n);
+                if(!sgu::lcp_decode(raw.data()+at,raw.size()-at,n,lcp.data()))fail("invalid joint LCP plane");
+                at=raw.size();
             }
         }else if(codec==0){
             for(unsigned i=0;i<n;++i){auto from=take(raw,at),weight=take(raw,at);

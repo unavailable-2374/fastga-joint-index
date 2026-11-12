@@ -21,6 +21,13 @@ optional complete seed audit. The corrected native baseline also contains:
 * contig padding/permutation handling when index and runtime thread counts differ;
 * aligned in-memory overlap headers decoded from packed variable-length records;
 * the missing standard varargs include needed by the Linux build.
+* compute-budget hooks (`src/sxgc_gate.h`): the section threads of `GIXmake`, the bucket sorts of `MSDsort` and the stream emitter
+  take a token of the construction stage's shared pool while they compute and give it back around blocking pipe writes; without
+  `SXGC_BUDGET_GATE` they are no-ops and the programs behave as upstream.
+* checked output writes: `ALNtoPAF`/`ALNtoPSL` verify their part files and standard output (flush, `ferror`, `fclose`),
+  the ONE library verifies flush and close of every file it writes, `FAtoGDB` verifies the `.bps` sequence file,
+  and `FastGA`/`GIXmake` write seed and index files with a retrying full-write helper. Each failure prints the program,
+  file and `strerror` text and exits non-zero (ENOSPC, EFBIG and EIO were all injected during validation).
 
 These native fixes are part of both reported baselines. Claims of losslessness
 refer to the corrected native implementation, not every unmodified upstream
