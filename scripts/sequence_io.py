@@ -13,7 +13,7 @@ def save(path, value):
     temporary.replace(path)
 
 def fasta_stats(path):
-    lengths, current, total, ambiguous = {}, None, 0, 0
+    lengths, trailing, current, total, ambiguous = {}, {}, None, 0, 0
     content_hash = hashlib.sha256()
     with open_fasta(path) as stream:
         for line in stream:
@@ -23,6 +23,7 @@ def fasta_stats(path):
                 if current in lengths:
                     raise RuntimeError('duplicate FASTA identifier: ' + current)
                 lengths[current] = 0
+                trailing[current] = 0
             else:
                 bases = line.strip().upper()
                 if not bases:
@@ -30,14 +31,23 @@ def fasta_stats(path):
                 if current is None or re.search(b'[^ACGTRYSWKMBDHVN]', bases):
                     raise RuntimeError('invalid FASTA sequence in ' + str(path))
                 lengths[current] += len(bases)
+                kept = len(bases.rstrip(b'N'))
+                trailing[current] = trailing[current] + len(bases) if not kept else len(bases) - kept
                 total += len(bases)
                 ambiguous += len(bases) - sum(bases.count(c) for c in (b'A', b'C', b'G', b'T'))
     if not lengths or not all(lengths.values()):
         raise RuntimeError('empty FASTA record in ' + str(path))
     return dict(contigs=len(lengths), bases=total, ambiguous_bases=ambiguous,
-                decompressed_sha256=content_hash.hexdigest(), contig_lengths=lengths)
+                decompressed_sha256=content_hash.hexdigest(), contig_lengths=lengths,
+                # FastGA reports a scaffold's length up to its last non-N base:
+                # trailing N gaps are dropped, leading ones are kept.
+                fastga_lengths={n: lengths[n] - trailing[n] for n in lengths})
 
-def paf_stats(path, contigs, target_contigs=None):
+def fastga_lengths(record):
+    """Lengths as FastGA PAF reports them; older reports lack the field."""
+    return record.get('fastga_lengths') or record['contig_lengths']
+
+def paf_stats(path, contigs, target_contigs=None, allow_empty=False):
     if target_contigs is None:
         target_contigs = contigs
     count = 0
@@ -64,14 +74,14 @@ def paf_stats(path, contigs, target_contigs=None):
             if qspan != qe - qs or tspan != te - ts:
                 raise RuntimeError('CIGAR span differs from PAF coordinates')
             count += 1
-    if not count:
+    if not count and not allow_empty:
         raise RuntimeError('whole-assembly alignment unexpectedly has no records')
     return count
 
 def merge_fastas(sources, target, chunk_bytes=4 * 1024 * 1024):
     """Prefix only FASTA headers; bind every original byte to its source hash."""
     merged_hash = hashlib.sha256()
-    contigs = {}
+    contigs, reported = {}, {}
     with target.open('xb') as out:
         for source in sources:
             prefix = (source['sample'] + '|').encode('ascii')
@@ -107,6 +117,7 @@ def merge_fastas(sources, target, chunk_bytes=4 * 1024 * 1024):
                 if identifier in contigs:
                     raise RuntimeError('duplicate merged FASTA identifier: ' + identifier)
                 contigs[identifier] = length
+                reported[identifier] = fastga_lengths(source)[name]
     return dict(path=str(target), sha256=merged_hash.hexdigest(),
-                contigs=len(contigs), bases=sum(contigs.values()), contig_lengths=contigs,
+                contigs=len(contigs), bases=sum(contigs.values()), contig_lengths=contigs, fastga_lengths=reported,
                 transformation='Prefix the first FASTA identifier token with sample|, trimming leading header spaces/tabs; preserve all sequence bytes.')

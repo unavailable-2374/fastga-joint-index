@@ -193,15 +193,13 @@ complete native PAFs at one and 24 threads, including masking and self alignment
 `tests/test_codec.cpp` tests 64-bit weight frames against an independent byte
 oracle and forces multi-level external sorting with small labelled TEST buffers.
 
-`scripts/benchmark.py` uses complete real assemblies, independent source-v3 indexes,
-full record multisets, a separate full seed-pair validation pass, and four timed
-rounds reversing backend order. Complete PAFs are sorted and byte-compared.
-Each workload fully parses the first complete PAF, including all CIGAR spans.
-Later complete sorted PAFs are byte-compared to that validated result; their
-record counts follow from this exact identity, without repeated parsing.
-`--reuse-controls` requires saved complete seed/PAF controls, the same frozen
-executable hashes and an unchanged canonical PAF; it never supplies missing
-observations. New timing rounds still execute every backend.
+`scripts/benchmark.py` uses complete real assemblies and compares original FastGA
+(GIXmake + FastGA-baseline) with the joint index, building each pair once and
+aligning once per storage mode in the selected directions (default A to B).
+Many different pairs are run once each instead of repeating timing rounds.
+Complete PAFs are sorted with `LC_ALL=C` and byte-compared; the first one is fully
+parsed, including all CIGAR spans. `--seed-audit` adds an untimed full seed-pair
+control pass. Speed (joint/native wall ratio, limit 1.2) is recorded, not enforced.
 `scripts/adopt_build.py --build OLD --bin NEW_BIN --output NEW_CHECKPOINT` supports
 reader-only upgrades: it keeps the original producer report, checks input hashes
 and all index sizes, then reruns all six full decoded-record controls with the

@@ -40,7 +40,7 @@ def main():
                 output = work/label
                 command = [sys.executable, ROOT/'scripts/benchmark.py', '--bin', runner.binpath,
                            '--inputs', *inputs, '--threads', '4', '--build-passes', str(passes),
-                           '--build-backend', backend, '--simulated-test', '--construction-only', '--output', output]
+                           '--build-backend', backend, '--directions', 'self', '--simulated-test', '--construction-only', '--output', output]
                 if reuse:
                     command += ['--native-paired', first['paths']['native_paired'],
                                 '--native-merged', first['paths']['native_merged']]
@@ -49,9 +49,9 @@ def main():
                 report = json.loads((output/'report.json').read_text())
                 assert report['status']=='MEASURED' and report['kind'].startswith('SIMULATED TEST DATA')
                 assert report['construction']['passes']==passes and report['construction']['shared_sort_backend']==backend
-                assert len(report['builds'])==(6 if reuse else 9)*passes
+                assert len(report['builds'])==(3 if reuse else 6)*passes
                 assert all(row['wall_seconds']>0 and row['exit_code']==0 for row in report['builds'])
-                assert len(report['checks'])==(6 if passes==1 else 6+9*(passes-1))
+                assert len(report['checks'])==(3*passes if reuse else 3+6*(passes-1))
                 for scope, value in report['construction']['scopes'].items():
                     for mode, times in value['seconds'].items():
                         if reuse and mode=='native':
@@ -60,7 +60,7 @@ def main():
                         else:
                             assert len(times)==passes and value['median_seconds'][mode]==statistics.median(times)
                     for repeat in range(passes):
-                        for mode in ('native','source','joint'):
+                        for mode in ('native','joint'):
                             if reuse and mode=='native':continue
                             rows = {row['sample']: row['wall_seconds'] for row in report['builds']
                                     if row['storage']==mode and row['pass_number']==repeat}
@@ -78,7 +78,6 @@ def main():
                 paths = report['paths']
                 indexes = {
                     'native': {n: Path(paths['native_merged'] if n=='merged' else paths['native_paired'])/(n+'.gix') for n in ('A','B','merged')},
-                    'source': {n: Path(p) for n,p in paths['sources'].items()},
                     'joint': {n: Path(paths['merged_view'] if n=='merged' else paths['joint'])/(n+'.gix') for n in ('A','B','merged')}}
                 for query,target in [('A','B'),('B','A'),('merged',None)]:
                     outputs, audits = {}, {}
@@ -90,7 +89,7 @@ def main():
                         if target: cmd.append(indexes[mode][target])
                         paf = runner.run(tag, cmd, env={'SXGC_SEED_AUDIT':str(audits[mode])})
                         outputs[mode] = sorted(paf.read_bytes().splitlines())
-                    for mode in ('source','joint'):
+                    for mode in ('joint',):
                         assert outputs[mode]==outputs['native']
                         control = runner.run(f'{label}-{query}-{mode}-seeds', [runner.binpath/'gixshare','compare-seeds',
                             indexes['native'][query], indexes['native'][target or query], audits['native'],

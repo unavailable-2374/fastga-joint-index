@@ -82,6 +82,7 @@ class Runner:
                 if monitor: monitor.join()
         row = dict(name=name, command=list(map(str, args)), exit_code=proc.returncode,
                    wall_seconds=finished - start,
+                   cpu_user_seconds=usage.ru_utime, cpu_system_seconds=usage.ru_stime, cpu_seconds=usage.ru_utime + usage.ru_stime,
                    peak_rss_bytes=usage.ru_maxrss * (1 if sys.platform == 'darwin' else 1024),
                    stdout=str(stdout), stderr=str(stderr))
         if measure_tree:

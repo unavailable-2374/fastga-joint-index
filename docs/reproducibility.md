@@ -95,14 +95,12 @@ python3 scripts/finalize_benchmark.py --build results/checkpoint \
   --workloads results/AB results/BA results/self
 ```
 
-Each workload normally performs two full correctness-control alignments and
-twelve timed executions: three backends times four rounds. Use separate,
-comparable allocations for parallel workloads. Do not compile, compress source
-archives or run unrelated CPU-intensive work on a timing allocation.
+Each workload performs one native and one joint alignment (plus an optional
+untimed `--seed-audit` control pass). Use separate, comparable allocations for
+parallel workloads. Do not compile, compress source archives or run unrelated
+CPU-intensive work on a timing allocation.
 
-`--reuse-controls` accepts only completed full seed/PAF controls from the same
-frozen executable hashes and an unchanged validated PAF. It does not create
-missing observations. `scripts/adopt_build.py` can revalidate an existing
+`scripts/adopt_build.py` can revalidate an existing
 physical index using a newer reader: it preserves original producer evidence,
 checks immutable inputs and sizes, and repeats all six full record controls.
 New-reader seed/PAF controls and timings must still execute.
