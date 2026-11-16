@@ -17,7 +17,19 @@ The command accepts one or two inputs, as FastGA does. Two FASTA inputs use the
 v4 joint constructor with the first input as reference. A single FASTA uses the
 v3 source-backed index; self-alignment compares its full original set of records.
 Mixed FASTA/`.gix` commands construct only the FASTA side as v3. Existing `.gix`
-commands pass directly to the unchanged alignment driver.
+commands pass directly to the alignment driver (`FastGA-shared-core`).
+
+`--index native` (or `--index=native`) builds the upstream FastGA files instead:
+`FAtoGDB` and the upstream `GIXmake -k40`, one input after the other, each with the
+whole `-T`, as FastGA does for FASTA inputs. The GDB and the GIX with its
+`.<name>.ktab.N` parts are kept in the same temporary or `-k` bundle, and the same
+driver aligns them, so the PAF is byte-identical to the default `--index joint`.
+`build.json` reports `"storage": "native"` and `"backend": "upstream-gixmake"`, and
+`-k` keeps the two kinds of index in separate cache entries. The upstream index
+is 3–5 times larger on disk (the shared index was 18–35% of it on ten genome pairs)
+and faster to build; `--index-backend` selects
+the sorter of the shared index only and is rejected together with `--index native`.
+Index options are rejected when no input is a FASTA file.
 
 FASTA suffixes are `.fa`, `.fna`, `.fasta`, optionally followed by `.gz`.
 Numeric values are attached to the option, for example `-T24`, `-f20`, `-i0.9`.
@@ -55,6 +67,18 @@ streams the suffix array from `pfbwt -t A` (A workers, its producing main thread
 and its ordered writer) into `pfp-emit` with `T-A-2` threads; below four threads
 pfbwt runs serially (the fused joint writer gives `pfp-emit` half of the budget). Neither path writes native GIX/ktab intermediate indexes.
 The split of every stage is recorded under `thread_allocation` in `build.json`.
+
+Alignment keeps the same bound. During the seed search a producer thread loads,
+sorts and cuts the next seed part with `-T` threads while the `-T` searchers work on
+the current ones. Both draw from one in-process pool of `-T` tokens (`FastGA.c`, the
+`rmsd_sort` hooks in `RSDsort.c`): a searcher holds a token while it runs tasks and
+returns it when it waits for work or when a part-loading thread waits, and those
+threads go first so that the next part is ready in time. The driver fails if the pool
+ever counted more than `-T` holders. On maize B73 × Mo17 (B → A, `-T24` on 24 CPUs,
+two alternating runs each) the run-queue wait of the driver's threads fell from
+10.2% and 8.2% of their CPU time to 3.0% and 4.5%, with byte-identical output and
+wall times of 2:26 and 2:29 against 2:32 and 2:31. Other users' processes on the same
+CPUs also cause run-queue wait, so the remainder is not all the driver's own.
 
 With `-k`, a completed immutable bundle is kept at
 `.fastga-shared/<configuration-sha256>/index` under the current working directory.

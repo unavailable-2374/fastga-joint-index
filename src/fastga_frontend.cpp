@@ -17,21 +17,32 @@ struct Options {
     fs::path scratch;
     bool keep=false;
     std::string backend="native";
+    std::string index="joint"; // joint: the FastGA-shared index; native: upstream FastGA GDB/GIX files
 };
+// --name VALUE or --name=VALUE; returns false for other tokens.
+bool long_option(const Command &arguments, size_t &at, const std::string &name, std::string &value) {
+    const auto &token=arguments[at];
+    if (token==name) {
+        if (++at==arguments.size()) throw std::runtime_error(name+" requires a value");
+        value=arguments[at];
+        return true;
+    }
+    if (token.rfind(name+"=",0)==0) { value=token.substr(name.size()+1); return true; }
+    return false;
+}
+bool index_option(const std::string &token) { return token.rfind("--index",0)==0; }
 Options parse(const Command &arguments) {
     Options result;
     const char *tmp=getenv("TMPDIR"); result.scratch=tmp?tmp:".";
     std::set<char> paf_flags;
     const std::regex flags("-[vkMS]+"),integer("-[Tfcsl]\\+?[0-9]+"),paf("-paf[mxsS]*");
     for (size_t at=0; at<arguments.size(); ++at) {
-        const auto &token=arguments[at];
-        if (token=="--index-backend" || token.rfind("--index-backend=",0)==0) {
-            if (token=="--index-backend") {
-                if (++at==arguments.size()) throw std::runtime_error("--index-backend requires native or pfp");
-                result.backend=arguments[at];
-            } else result.backend=token.substr(std::strlen("--index-backend="));
+        if (long_option(arguments,at,"--index-backend",result.backend)) continue;
+        if (long_option(arguments,at,"--index",result.index)) {
+            if (result.index!="joint" && result.index!="native") throw std::runtime_error("--index must be joint or native");
             continue;
         }
+        const auto &token=arguments[at];
         if (!token.empty() && token[0]=='#') {
             if (result.inputs.empty()) throw std::runtime_error("a # mask must follow its input genome");
             result.masks.emplace_back(result.inputs.size()-1,token.substr(1));
@@ -97,7 +108,7 @@ Json configuration(const fs::path &binary, const Options &options) {
                         {"sha256",digest.at(source.string())},{"implicit_mask",!has_masks || implicit},{"masks",masks}});
     }
     BuildSettings settings;
-    settings.storage=rows.size()==2?"joint":"source";
+    settings.storage=options.index=="native"?"native":rows.size()==2?"joint":"source";
     settings.backend=options.backend;
     return make_configuration(binary,binary/"FastGA-shared",rows,options.threads,settings);
 }
@@ -141,6 +152,8 @@ int main_entry(int argc, char **argv) {
                    "  FastGA-shared -T24 -pafx A.fa B.fa > A_B.paf\n"
                    "  FastGA-shared -T24 -pafx A.fa > A.paf\n"
                    "Two FASTA inputs: joint v4; one FASTA: source v3.\n"
+                   "--index joint|native: joint (default) builds the FastGA-shared index above;\n"
+                   "  native builds the upstream FastGA GDB/GIX files (larger on disk, faster to build).\n"
                    "-k retains/reuses a content-checked index under .fastga-shared/.\n"
                    "Without -k, temporary indexes are removed after alignment.\n"
                    "-1: output retains indexes for later sequence access.\n"
@@ -153,6 +166,8 @@ int main_entry(int argc, char **argv) {
     bool have_fasta=false;
     for (const auto &arg:arguments) if (!arg.empty() && arg[0]!='-' && arg[0]!='#' && fasta(arg)) have_fasta=true;
     if (!have_fasta) {
+        for (const auto &arg:arguments)
+            if (index_option(arg)) throw std::runtime_error(arg+": index options apply only to FASTA inputs");
         Command command={core.string()}; command.insert(command.end(),arguments.begin(),arguments.end());
         exec_core(command);
     }

@@ -16,13 +16,17 @@ inline Json make_configuration(const fs::path &binary, const fs::path &driver, J
     if (settings.backend!="native" && settings.backend!="pfp") throw std::runtime_error("backend must be native or pfp");
     if (settings.backend=="pfp" && threads<2) throw std::runtime_error("PFP sorting requires at least two threads for its concurrent emitter and sorter");
     if (settings.window<4 || settings.modulus<10) throw std::runtime_error("PFP window must be >=4 and modulus >=10");
-    if (settings.storage!="legacy" && settings.storage!="positions" && settings.storage!="source" && settings.storage!="joint")
-        throw std::runtime_error("storage must be legacy, positions, source or joint");
+    if (settings.storage!="legacy" && settings.storage!="positions" && settings.storage!="source" && settings.storage!="joint" &&
+        settings.storage!="native")
+        throw std::runtime_error("storage must be legacy, positions, source, joint or native");
     bool joint=settings.storage=="joint",pfp=settings.backend=="pfp"; // joint copies come from the anchor finder; only the PFP backend sorts with Big-BWT
+    bool upstream=settings.storage=="native"; // upstream GDB/GIX files, made by the upstream GIXmake
     if (joint && samples.size()!=2) throw std::runtime_error("joint storage needs exactly two samples");
     if (joint && pfp && (settings.window!=10 || settings.modulus!=100)) throw std::runtime_error("joint v4 requires --pfp-window 10 --pfp-modulus 100 with the pfp backend");
+    if (upstream && pfp) throw std::runtime_error("the native index is made by the upstream GIXmake; the pfp backend applies only to the shared index");
     std::vector<std::string> programs={"FAtoGDB"};
-    if (settings.backend=="native" || joint) programs.insert(programs.end(),{"GIXmake-direct","gixshare"});
+    if (upstream) programs.push_back("GIXmake");
+    else if (settings.backend=="native" || joint) programs.insert(programs.end(),{"GIXmake-direct","gixshare"});
     if (pfp) programs.insert(programs.end(),{"GIXmake-marks","pfp-emit"});
     if (joint) programs.insert(programs.end(),{"GIXmake-marks","joint-copy"});
     Json hashes=Json::object();
@@ -317,6 +321,17 @@ class FastaBuilder {
         emit_pfp(prefixes,text,storage);
         if (verify_pfp()!=manifest) throw std::runtime_error("PFP toolchain manifest changed during construction");
     }
+    // --index=native: the upstream GDB/GIX files. Each input's GDB is indexed by the upstream GIXmake with the whole
+    // budget, one input after another, as FastGA does for FASTA inputs; the GIX parts are kept next to its GDB.
+    void upstream_gix() {
+        std::vector<std::pair<std::string,int>> plan;
+        for (const auto &sample:config_.at("inputs")) plan.emplace_back("GIXmake-"+sample.at("sample").get<std::string>(),threads_);
+        allot("upstream-gix",plan,false);
+        for (const auto &sample:config_.at("inputs"))
+            run("GIXmake-"+sample.at("sample").get<std::string>(),producer(sample,"GIXmake",threads_));
+        report_["native_gix_materialized"]=true;
+        write_text(stage_/"READY","FastGA upstream GIX\n");
+    }
     void native_streams(const std::string &storage, const std::map<std::string,std::string> &target_filter={},
                         const std::vector<std::string> &extra={}) {
         const auto &samples=config_.at("inputs");
@@ -552,8 +567,9 @@ public:
         fs::create_directories(logs_.parent_path());
         if (!fs::create_directory(logs_)) throw std::runtime_error("log directory already exists: "+logs_.string());
         auto storage=config_.at("storage").get<std::string>();
-        int version=storage=="joint"?4:storage=="source"?3:storage=="positions"?2:1;
-        report_={{"status","RUNNING"},{"constructor","native-cpp"},{"backend",backend()=="pfp"?"pfp-bigbwt":"native-sort-stream"},{"storage",storage},
+        int version=storage=="joint"?4:storage=="source"?3:storage=="positions"?2:storage=="native"?0:1;
+        report_={{"status","RUNNING"},{"constructor","native-cpp"},
+                 {"backend",storage=="native"?"upstream-gixmake":backend()=="pfp"?"pfp-bigbwt":"native-sort-stream"},{"storage",storage},
                  {"format_version",version},{"k",40},{"total_thread_budget",threads_},{"thread_allocation",Json::object()},
                  {"inputs",Json::array()},{"masks",Json::object()},{"implicit_masks",Json::array()},
                  {"commands",Json::array()},{"native_gix_materialized",false},{"pfp_used",false},{"executables",config_.at("constructor_sha256")}};
@@ -582,6 +598,7 @@ public:
                 wait(conversions);
             }
             if (storage=="joint") joint();
+            else if (storage=="native") upstream_gix();
             else if (backend()=="pfp") independent_pfp(storage);
             else {
                 std::vector<fs::path> staged;
@@ -592,15 +609,20 @@ public:
             validate_identities(config_);
             for (const auto &item:config_.at("constructor_sha256").items())
                 if (sha256(binary_/item.key())!=item.value().get<std::string>()) throw std::runtime_error("executable changed during construction: "+item.key());
-            report_["index"]=read_json(logs_/"merge.json");
-            report_["index"].erase("joint"); // recorded as joint_index
+            if (storage!="native") {
+                report_["index"]=read_json(logs_/"merge.json");
+                report_["index"].erase("joint"); // recorded as joint_index
+            }
             report_["index_files"]=Json::object(); report_["retained_files"]=Json::object();
             uint64_t bytes=0;
             for (const auto &entry:fs::directory_iterator(stage_)) if (entry.is_regular_file()) {
                 auto name=entry.path().filename().string(); auto size=entry.file_size();
-                if (name.find(".ktab.")!=std::string::npos) throw std::runtime_error("native ktab intermediate was materialized unexpectedly");
+                // An upstream GIX keeps its k-mer table parts in hidden .<name>.ktab.N files.
+                bool upstream_part=storage=="native" && name[0]=='.' && name.find(".ktab.")!=std::string::npos;
+                if (name.find(".ktab.")!=std::string::npos && !upstream_part)
+                    throw std::runtime_error("native ktab intermediate was materialized unexpectedly");
                 report_["retained_files"][name]=size;
-                if (entry.path().extension()==".gix" || name=="sequences.sgd" || name=="READY" || name=="reference.sgr" ||
+                if (entry.path().extension()==".gix" || upstream_part || name=="sequences.sgd" || name=="READY" || name=="reference.sgr" ||
                     name=="residual.sgr" || name=="reference.meta" || name=="target.meta" || name.rfind("joint.",0)==0) {
                     report_["index_files"][name]=size; bytes+=size;
                 }

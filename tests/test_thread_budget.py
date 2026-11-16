@@ -126,11 +126,13 @@ def main():
                      ('native', 5, {'FASTGA_SHARED_STREAM_RANGES': '7'}),
                      ('pfp', 24, {'FASTGA_SHARED_PFP_SPLIT': '0,23'}),
                      ('pfp', 24, {'FASTGA_SHARED_PFP_SPLIT': '6,16'})]
+            runs += [('upstream', t, {}) for t in (1, 5, 24)]   # --index=native: the upstream GIXmake
             for index, (backend, threads, env) in enumerate(runs):
                 label = f'{backend}-T{threads}' + ''.join(f'-{k}={v}' for k, v in env.items())
                 work = root/f'run{index}'
                 work.mkdir()
-                paf = run([binary/'FastGA-shared', '--index-backend', backend, f'-T{threads}', '-k', '-pafx', *inputs], work, env)
+                selection = ['--index', 'native'] if backend == 'upstream' else ['--index-backend', backend]
+                paf = run([binary/'FastGA-shared', *selection, f'-T{threads}', '-k', '-pafx', *inputs], work, env)
                 if expected is None:
                     expected = paf
                     if not paf:

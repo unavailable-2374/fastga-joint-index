@@ -99,6 +99,11 @@ Existing `.gix` arguments continue directly to the original alignment driver.
 the generated GDB/index so the alignment file stays readable after exit. Keep
 the native tools and `pfp-tools/` together when moving the build directory.
 `--index-backend pfp` selects PFP sorting for automatic FASTA construction.
+
+`--index native` builds the upstream FastGA GDB/GIX files instead of the
+FastGA-shared index (`--index joint`, the default). Both align with the same
+driver and give byte-identical PAF; the upstream index takes 3–5 times the disk
+space and is faster to build.
 See [command-line details](docs/cli.md).
 
 ## Build an index explicitly

@@ -82,6 +82,13 @@ def main():
             compare('requested-T24-self', [binary/'FastGA-shared', '-T24', '-pafx', inputs[0]], self_paf)
             compare('inline-PFP-pair', [binary/'FastGA-shared', '--index-backend', 'pfp', '-T4', '-pafx', *inputs], paf)
             compare('inline-PFP-self', [binary/'FastGA-shared', '--index-backend=pfp', '-T4', '-pafx', inputs[0]], self_paf)
+            # --index=native builds the upstream GDB/GIX files instead of the shared index.
+            compare('native-index-pair', [binary/'FastGA-shared', '--index=native', '-T4', '-pafx', *inputs], paf)
+            compare('native-index-self', [binary/'FastGA-shared', '--index', 'native', '-T4', '-pafx', inputs[0]], self_paf)
+            compare('native-index-one-thread', [binary/'FastGA-shared', '--index=native', '-T1', '-pafx', *inputs], paf)
+            compare('native-index-mask-frequency', [binary/'FastGA-shared', '--index=native', '-T4', '-pafx', '-M', '-f20', *inputs],
+                    baseline('mask-freq', ['-pafx', '-M', '-f20']))
+            compare('explicit-joint-index', [binary/'FastGA-shared', '--index=joint', '-T4', '-pafx', *inputs], paf)
             if list(root.glob('.fastga-shared-*')) or list(scratch.iterdir()):
                 raise RuntimeError('temporary index or scratch files survived default completion')
             report['checks'].append(dict(check='temporary-cleanup', status='PASS'))
@@ -163,11 +170,37 @@ def main():
                 raise RuntimeError('one-thread construction did not serialize its raw streams')
             report['checks'].append(dict(check='one-thread-construction-budget', status='PASS'))
 
+            # A retained native index is a separate cache entry with upstream GIX files equivalent to GIXmake's own.
+            native_command = [binary/'FastGA-shared', '--index=native', '-k', '-T24', '-pafx', *inputs]
+            compare('retained-native-first-build', native_command, expected, cwd=cached)
+            native_entries = [p for p in (cached/'.fastga-shared').iterdir()
+                              if p.is_dir() and not p.name.startswith('.') and p != entries[0]]
+            if len(native_entries) != 1:
+                raise RuntimeError('the native index did not get its own retained entry')
+            native_bundle = native_entries[0]/'index'
+            native_report = json.loads((native_bundle/'build.json').read_text())
+            if native_report['storage'] != 'native' or native_report['backend'] != 'upstream-gixmake':
+                raise RuntimeError('retained native index reports the wrong construction')
+            if not list(native_bundle.glob('.A.ktab.*')) or not list(native_bundle.glob('.B.ktab.*')):
+                raise RuntimeError('retained native index lacks its upstream GIX parts')
+            native_before = (native_bundle/'build.json').stat().st_mtime_ns
+            compare('retained-native-cache-reuse', native_command, expected, cwd=cached)
+            if native_before != (native_bundle/'build.json').stat().st_mtime_ns:
+                raise RuntimeError('cache reuse rebuilt an unchanged native index')
+            for name in ('A', 'B'):   # same -T as the GIXmake control, so the same table parts
+                parts = sorted(p.name for p in native.glob('.'+name+'.ktab.*'))
+                if parts != sorted(p.name for p in native_bundle.glob('.'+name+'.ktab.*')):
+                    raise RuntimeError('retained native index has other table parts than GIXmake: '+name)
+                for part in [name+'.gix', *parts]:
+                    if (native/part).read_bytes() != (native_bundle/part).read_bytes():
+                        raise RuntimeError('retained native index differs from GIXmake output: '+part)
+                report['checks'].append(dict(check='native-index-bytes-equal-GIXmake-'+name, status='PASS', files=1+len(parts)))
+
             # A changed input must create a new bundle even with the same filename.
             inputs[1].write_text(texts[1]+'\n')
             compare('content-change-invalidates-cache', command, expected, cwd=cached)
             entries = [p for p in (cached/'.fastga-shared').iterdir() if p.is_dir() and not p.name.startswith('.')]
-            if len(entries) != 2:
+            if len(entries) != 3:   # the joint and native entries of the original inputs, and the changed one
                 raise RuntimeError('changed FASTA content reused a stale index')
             inputs[1].write_text(texts[1])
             manifest = bundle/'build.json'
@@ -207,6 +240,11 @@ def main():
 
             run([binary/'FastGA-shared', '-T24', '--invalid', *inputs], error='unrecognized or invalid option')
             run([binary/'FastGA-shared', '-T24', '-invalid', *inputs], error='invalid alignment identity')
+            run([binary/'FastGA-shared', '--index=compact', '-T4', *inputs], error='--index must be joint or native')
+            run([binary/'FastGA-shared', '--index=native', '--index-backend=pfp', '-T4', *inputs],
+                error='the pfp backend applies only to the shared index')
+            run([binary/'FastGA-shared', '--index=native', '-T4', native/'A.gix', native/'B.gix'],
+                error='index options apply only to FASTA inputs')
             run([binary/'FastGA-shared', '-T24', '-pafx', root/'missing.fa'], error='No such file or directory')
             malformed = root/'malformed.fa'
             malformed.write_text('THIS IS SIMULATED MALFORMED TEST INPUT; NOT FASTA\n')
@@ -231,7 +269,7 @@ def main():
             # script, shell wrapper or source checkout is available in this bundle.
             standalone=root/'native-only'
             standalone.mkdir()
-            for name in ('FastGA-shared','GIXmake-shared','FastGA-shared-core','FAtoGDB','GIXmake-direct','GIXmake-marks',
+            for name in ('FastGA-shared','GIXmake-shared','FastGA-shared-core','FAtoGDB','GIXmake','GIXmake-direct','GIXmake-marks',
                          'gixshare','joint-copy','pfp-emit','ALNtoPAF','ALNtoPSL'):
                 shutil.copy2(binary/name,standalone/name)
             shutil.copytree(binary/'pfp-tools',standalone/'pfp-tools')
@@ -241,8 +279,9 @@ def main():
             magic=(standalone/'FastGA-shared').read_bytes()[:4]
             if magic not in (b'\x7fELF',b'\xcf\xfa\xed\xfe',b'\xfe\xed\xfa\xcf',b'\xca\xfe\xba\xbe'):
                 raise RuntimeError('FastGA-shared is not a native executable')
-            for label, paths, expected_output in [('pair',inputs,paf),('self',[inputs[0]],self_paf),('gzip',zipped,paf)]:
-                result=subprocess.run([str(standalone/'FastGA-shared'),'-T24','-pafx',*map(str,paths)],
+            for label, flags, paths, expected_output in [('pair',[],inputs,paf),('self',[],[inputs[0]],self_paf),('gzip',[],zipped,paf),
+                                                         ('native-index-pair',['--index=native'],inputs,paf)]:
+                result=subprocess.run([str(standalone/'FastGA-shared'),*flags,'-T24','-pafx',*map(str,paths)],
                                       cwd=root,env=restricted,capture_output=True)
                 if result.returncode:
                     raise RuntimeError('Program FastGA-shared failed with: '+result.stderr.decode(errors='replace'))

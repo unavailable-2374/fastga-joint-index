@@ -3,13 +3,13 @@
 // restores physical positions, copy translation and masks only for the rows of emitted groups. No key byte is read.
 #ifdef SXGC_UNION_PROF
 #include <x86intrin.h>
-static inline uint64_t sxgc_now(){return __rdtsc();}
+static inline uint64_t sxgc_now(){_mm_lfence();uint64_t t=__rdtsc();_mm_lfence();return t;}
 #define SXGC_TICK(x) x=sxgc_now()
 #else
 #define SXGC_TICK(x)
 #endif
 struct UnionPlan {
-    std::shared_ptr<JointData>d1,d2;uint64_t total=0,chunk=0,nchunks=0;uint64_t freq=0;bool flip=false;
+    std::shared_ptr<JointData>d1,d2;uint64_t total=0,chunk=0,nchunks=0;uint64_t freq=0;bool flip=false,self=false;
     std::atomic<uint64_t>next{0};
     static constexpr uint64_t CHUNK_BLOCKS=64;
 };
@@ -24,6 +24,17 @@ std::shared_ptr<UnionPlan> union_plan(Kmer_Stream*t1,Kmer_Stream*t2,uint64_t fre
     if((d1->view.selection!=1&&d1->view.selection!=2)||(d2->view.selection!=1&&d2->view.selection!=2))return nullptr;
     if(d1->view.root!=d2->view.root||u32(d1->order.h.data()+76)!=2||u32(d2->order.h.data()+76)!=2||d1->order.count!=d2->order.count)return nullptr;
     auto p=std::make_shared<UnionPlan>();p->d1=d1;p->d2=d2;p->total=d1->order.count;p->freq=freq;p->flip=flip;
+    p->chunk=uint64_t(BLOCK)*UnionPlan::CHUNK_BLOCKS;p->nchunks=(p->total+p->chunk-1)/p->chunk;return p;
+}
+// Self merge over one joint view (any selection): the same walk with one view on both sides. Returns nullptr when the
+// stream is not a v5-order joint view.
+std::shared_ptr<UnionPlan> union_plan_self(Kmer_Stream*t1,uint64_t freq){
+    if(!t1||!t1->shared)return nullptr;
+    auto*s1=dynamic_cast<JointStream*>(static_cast<StreamState*>(t1->shared));
+    if(!s1)return nullptr;
+    auto&d1=s1->d;
+    if(d1->view.selection<1||d1->view.selection>3||u32(d1->order.h.data()+76)!=2)return nullptr;
+    auto p=std::make_shared<UnionPlan>();p->d1=d1;p->d2=d1;p->total=d1->order.count;p->freq=freq;p->flip=false;p->self=true;
     p->chunk=uint64_t(BLOCK)*UnionPlan::CHUNK_BLOCKS;p->nchunks=(p->total+p->chunk-1)/p->chunk;return p;
 }
 // Decoded coordinates of one physical block, as arrays (start = occurrence start in its contig).
@@ -44,6 +55,9 @@ class UnionWorker {
     const unsigned pb1,pb2;const bool keep1_forward,keep2_forward;
     ReaderBlockCache<PhysBlock>pcache[2];std::shared_ptr<const PhysBlock>pcur[2];uint64_t pcur_index[2]={UINT64_MAX,UINT64_MAX};
     PhysBlock load_phys(unsigned sample,uint64_t index){
+#ifdef SXGC_UNION_PROF
+        struct PT{uint64_t&acc,&nb;uint64_t t0;PT(uint64_t&a,uint64_t&n):acc(a),nb(n),t0(sxgc_now()){}~PT(){acc+=sxgc_now()-t0;++nb;}}pt(q_pdec,q_pnb);
+#endif
         Physical&ph=*(sample?plan->d1->b:plan->d1->a);const auto&info=ph.a.blocks.at(index);const unsigned count=info.count;
         PhysBlock out;
         if(info.codec==sxgc_positions::PACKED&&ph.domain){
@@ -75,12 +89,20 @@ class UnionWorker {
         if(rev&&pos<40)fail("packed coordinate outside domain");
         start=rev?pos-40:pos;contig=uint32_t(ph.m.perm[rank]);reverse=rev;
     }
+    // Strand of physical row `row` alone (cheaper than physical(): no contig or position).
+    bool is_reverse(unsigned sample,uint64_t row){
+        const auto&b=phys(sample,row/BLOCK);const unsigned i=unsigned(row%BLOCK);
+        if(!b.packed)return b.reverse[i];
+        Physical&ph=*(sample?plan->d1->b:plan->d1->a);const auto&dom=*ph.domain;
+        const size_t bit=size_t(i)*dom.width;
+        return ((sxgc_positions::load64(b.bits.data()+(bit>>3))>>(bit&7))&((uint64_t(1)<<dom.width)-1))>=dom.strand;
+    }
     const PhysBlock&phys(unsigned sample,uint64_t index){
         if(pcur_index[sample]!=index){pcur[sample]=pcache[sample].get(index,[&]{return load_phys(sample,index);});pcur_index[sample]=index;}
         return *pcur[sample];
     }
     // Per-entry physical coordinates and covering copies (stage()); view contig codes; the bundle used for translation.
-    std::vector<uint32_t>pc,copied;std::vector<uint64_t>ps;std::vector<uint8_t>pr,needed;std::vector<const jc::Stab::Seg*>seg;
+    std::vector<uint32_t>pc,copied;std::vector<uint64_t>ps;std::vector<uint8_t>pr,needed;std::vector<const jc::Stab::Seg*>seg;std::vector<size_t>sidx;std::vector<uint8_t>tkeep;std::vector<int32_t>dl;
     JointData&dc;const bool translate;std::array<std::vector<uint32_t>,2>tc1,tc2;
     static std::array<std::vector<uint32_t>,2> contig_codes(const JointData&d){
         std::array<std::vector<uint32_t>,2>t;
@@ -89,12 +111,18 @@ class UnionWorker {
         return t;
     }
 #ifdef SXGC_UNION_PROF
-public:uint64_t q_get=0,q_dec=0,q_stab=0,q_res=0,q_pay=0,q_n=0;uint64_t t_gather=0,t_plan=0,t_rec1=0,t_rec2=0,panels=0,entries=0,groups=0,rows1=0,rows2=0;
+public:uint64_t q_get=0,q_dec=0,q_stab=0,q_res=0,q_pay=0,q_n=0,q_oinf=0,q_octor=0,q_pdec=0,q_onb=0,q_pnb=0;uint64_t t_gather=0,t_plan=0,t_rec1=0,t_rec2=0,panels=0,entries=0,groups=0,rows1=0,rows2=0;
 private:
 #endif
     const JointRankBlock&block(uint64_t v){
         if(v!=blk_index){
-            blk=cache->order.get(v,[&]{return JointRankBlock(d1.order.decode(v),d1.order.blocks.at(v).count,u32(d1.order.h.data()+76));});blk_index=v;
+            blk=cache->order.get(v,[&]{
+#ifdef SXGC_UNION_PROF
+            uint64_t a0=sxgc_now();auto raw=d1.order.decode(v);uint64_t a1=sxgc_now();JointRankBlock r(raw,d1.order.blocks.at(v).count,u32(d1.order.h.data()+76));uint64_t a2=sxgc_now();q_oinf+=a1-a0;q_octor+=a2-a1;++q_onb;return r;
+#else
+            return JointRankBlock(d1.order.decode(v),d1.order.blocks.at(v).count,u32(d1.order.h.data()+76));
+#endif
+        });blk_index=v;
         }
         return *blk;
     }
@@ -132,7 +160,7 @@ private:
         if(code.size()<=TRIM_ROWS&&scratch.before.size()<=TRIM_ROWS)return;
         drop(code);drop(origin);drop(m1);drop(m2);drop(weight);drop(row);
         drop(scratch.pos2);drop(scratch.w2);drop(scratch.l2);drop(scratch.before);drop(scratch.left);drop(scratch.right);drop(scratch.tasks);
-        drop(pc);drop(ps);drop(pr);drop(seg);drop(needed);drop(copied);drop(arena);drop(arena_at);drop(arena_n);drop(built);
+        drop(pc);drop(ps);drop(sidx);drop(tkeep);drop(dl);drop(pr);drop(seg);drop(needed);drop(copied);drop(arena);drop(arena_at);drop(arena_n);drop(built);
         drop(rec1);drop(rec2);
     }
     // Appends the entries of one panel (rows up to the next code-0 row) from the current chunk.
@@ -148,33 +176,52 @@ private:
                 unsigned stop=lim;const unsigned from=n?i0:i0+1;
                 if(from<lim){if(auto*z=static_cast<const uint8_t*>(memchr(b.lcp.data()+from,0,lim-from))){stop=unsigned(z-b.lcp.data());done=true;}}
                 const unsigned cnt=stop-i0;grow(n+cnt);
-                for(unsigned i=i0;i<stop;++i,++n){
-                    const unsigned w=i>>6,bit=i&63;
-                    const uint64_t o=(b.origin[w]>>bit)&1,positive=(b.positive[w]>>bit)&1,heavy=(b.heavy[w]>>bit)&1;
-                    uint64_t wt=positive;if(__builtin_expect(heavy,0))wt=b.at(i).weight;
-                    const uint64_t x=s1==1?1-o:(o?1:wt),y=s2==1?1-o:(o?1:wt);
-                    if(__builtin_expect((x|y|wt)>UINT32_MAX,0))fail("joint weight exceeds the union merge limit");
-                    code[n]=b.lcp[i];origin[n]=uint8_t(o);m1[n]=uint32_t(x);m2[n]=uint32_t(y);weight[n]=uint32_t(wt);
-                    row[n]=o?br:ar;br+=o;ar+=1-o;
+                if(cnt)memcpy(code.data()+n,b.lcp.data()+i0,cnt);
+                for(unsigned i=i0;i<stop;){
+                    // Up to the end of one 64-row word of the bit planes. Rows without a heavy weight (nearly all) have
+                    // wt = the positive bit, so the multiplicities are plain bit arithmetic.
+                    const unsigned w=i>>6,bit=i&63,run=std::min<unsigned>(stop-i,64-bit);
+                    const uint64_t o64=b.origin[w]>>bit,p64=b.positive[w]>>bit,h64=b.heavy[w]>>bit;
+                    if(__builtin_expect(!h64,1)){
+                        for(unsigned k=0;k<run;++k){
+                            const uint64_t o=(o64>>k)&1,p=(p64>>k)&1;
+                            const uint32_t x=uint32_t((s1&1?1-o:0)+(s1&2?p:0)),y=uint32_t((s2&1?1-o:0)+(s2&2?p:0));
+                            origin[n+k]=uint8_t(o);m1[n+k]=x;m2[n+k]=y;weight[n+k]=uint32_t(p);
+                            row[n+k]=o?br:ar;br+=o;ar+=1-o;
+                        }
+                    }else{
+                        for(unsigned k=0;k<run;++k){
+                            const uint64_t o=(o64>>k)&1,positive=(p64>>k)&1,heavy=(h64>>k)&1;
+                            uint64_t wt=positive;if(__builtin_expect(heavy,0))wt=b.at(i+k).weight;
+                            const uint64_t x=(s1&1?1-o:0)+(s1&2?(o?1:wt):0),y=(s2&1?1-o:0)+(s2&2?(o?1:wt):0);
+                            if(__builtin_expect((x|y|wt)>UINT32_MAX,0))fail("joint weight exceeds the union merge limit");
+                            origin[n+k]=uint8_t(o);m1[n+k]=uint32_t(x);m2[n+k]=uint32_t(y);weight[n+k]=uint32_t(wt);
+                            row[n+k]=o?br:ar;br+=o;ar+=1-o;
+                        }
+                    }
+                    n+=run;i+=run;
                 }
                 pos+=cnt;
             }
             if(pos>=end)active=false;
             SXGC_TICK(uint64_t t1);
             if(!n)continue;
-            sgu::plan_panel(code.data(),m1.data(),m2.data(),n,plan->freq,scratch);
+            if(plan->self)sgu::plan_panel_self(code.data(),m1.data(),n,plan->freq,scratch);
+            else sgu::plan_panel(code.data(),m1.data(),m2.data(),n,plan->freq,scratch);
             task_at=0;group_first=UINT32_MAX;
-            if(!scratch.tasks.empty()){
+            const bool work=plan->self?!scratch.stasks.empty():!scratch.tasks.empty();
+            if(work){
                 SXGC_TICK(uint64_t s0);stage();
 #ifdef SXGC_UNION_PROF
                 {uint64_t s1;SXGC_TICK(s1);q_dec+=s1-s0;}
 #endif
-                arena.clear();arena_at.resize(scratch.n2);arena_n.resize(scratch.n2);built.assign(scratch.n2,0);
+                const size_t items=plan->self?n:scratch.n2;
+                arena.clear();arena_at.resize(items);arena_n.resize(items);built.assign(items,0);
             }
 #ifdef SXGC_UNION_PROF
             uint64_t t2;SXGC_TICK(t2);t_gather+=t1-t0;t_plan+=t2-t1;++panels;entries+=n;
 #endif
-            if(!scratch.tasks.empty())return true;
+            if(work)return true;
         }
     }
     // Physical coordinates of every panel row, and (batched, with prefetching) the copies covering each row that has
@@ -182,7 +229,18 @@ private:
     void stage(){
         if(pc.size()<n){pc.resize(n);ps.resize(n);pr.resize(n);seg.resize(n);}
         needed.assign(n,0);copied.clear();
-        for(const auto&t:scratch.tasks){needed[t.entry]=1;for(uint32_t k=t.first;k<t.last;++k)needed[scratch.pos2[k]]=1;}
+        if(plan->self){for(const auto&t:scratch.stasks)for(uint32_t r=t.r0;r<t.r1;++r)needed[r]=1;}
+        else{
+            // A view-one row whose only record is not a copy translation (a residual row, or the reference row of a view
+            // that includes the reference) is emitted only on the forward strand, so a reverse-strand one never needs
+            // its task: its view-two rows are not staged on its account either.
+            tkeep.assign(scratch.tasks.size(),1);dl.assign(scratch.n2+1,0);
+            for(size_t i=0;i<scratch.tasks.size();++i){const auto&t=scratch.tasks[i];
+                if(keep1_forward&&m1[t.entry]==1&&(origin[t.entry]||(d1.view.selection&1))&&is_reverse(origin[t.entry],row[t.entry])){tkeep[i]=0;continue;}
+                needed[t.entry]=1;++dl[t.first];--dl[t.last];
+            }
+            {int32_t c=0;for(size_t k=0;k<scratch.n2;++k){c+=dl[k];if(c>0)needed[scratch.pos2[k]]=1;}}
+        }
         SXGC_TICK(uint64_t z0);
         for(size_t e=0;e<n;++e){
             if(!needed[e])continue;
@@ -192,9 +250,12 @@ private:
         SXGC_TICK(uint64_t z1);
         for(auto e:copied)dc.stab.prefetch_bucket(pc[e],ps[e]);
         for(auto e:copied)dc.stab.prefetch_segments(pc[e],ps[e]);
+        sidx.resize(copied.size());
+        for(size_t k=0;k<copied.size();++k){const auto e=copied[k];
+            if(dc.stab.covered(pc[e],ps[e])){const size_t s=dc.stab.index(pc[e],ps[e]);sidx[k]=s;dc.stab.prefetch_segment(pc[e],s);}else sidx[k]=SIZE_MAX;}
         SXGC_TICK(uint64_t z2);
-        for(auto e:copied){
-            const auto*g=dc.stab.segment(pc[e],ps[e]);if(!g||g->n!=weight[e])fail("joint weight/copy multiplicity mismatch");
+        for(size_t k=0;k<copied.size();++k){const auto e=copied[k];
+            const auto*g=sidx[k]==SIZE_MAX?nullptr:dc.stab.segment_at(pc[e],sidx[k]);if(!g||g->n!=weight[e])fail("joint weight/copy multiplicity mismatch");
             seg[e]=g;if(g->n>1)__builtin_prefetch(dc.stab.contigs[pc[e]].ids.data()+g->first,0,1);
         }
         for(auto e:copied)if(seg[e]->n>1)__builtin_prefetch(&dc.stab.copy(dc.stab.contigs[pc[e]].ids[seg[e]->first]),0,1);
@@ -239,13 +300,41 @@ public:
        pb1(7+plan->d1->view.m.csize),pb2(7+plan->d2->view.m.csize),keep1_forward(!plan->flip),keep2_forward(plan->flip),
        dc(plan->d2->view.selection&2?*plan->d2:*plan->d1),translate((plan->d1->view.selection|plan->d2->view.selection)&2),tc1(contig_codes(*plan->d1)),tc2(contig_codes(*plan->d2)){}
 #ifdef SXGC_UNION_PROF
-    ~UnionWorker(){fprintf(stderr,"record: get %.3f dec %.3f stab %.3f resolve %.3f payload-multi %llu Gcyc n %llu\n",q_get/1e9,q_dec/1e9,q_stab/1e9,q_res/1e9,(unsigned long long)q_pay,(unsigned long long)q_n);fprintf(stderr,"union prof: gather %.3f plan %.3f rec1 %.3f rec2 %.3f Gcyc; panels %llu entries %llu groups %llu rows1 %llu rows2 %llu\n",t_gather/1e9,t_plan/1e9,t_rec1/1e9,t_rec2/1e9,(unsigned long long)panels,(unsigned long long)entries,(unsigned long long)groups,(unsigned long long)rows1,(unsigned long long)rows2);}
+    ~UnionWorker(){fprintf(stderr,"record: get %.3f dec %.3f stab %.3f resolve %.3f payload-multi %llu Gcyc n %llu\n",q_get/1e9,q_dec/1e9,q_stab/1e9,q_res/1e9,(unsigned long long)q_pay,(unsigned long long)q_n);fprintf(stderr,"blocks: order-inflate %.3f order-ctor(lcp) %.3f nblk %llu | phys-decode %.3f nblk %llu Gcyc\n",q_oinf/1e9,q_octor/1e9,(unsigned long long)q_onb,q_pdec/1e9,(unsigned long long)q_pnb);fprintf(stderr,"union prof: gather %.3f plan %.3f rec1 %.3f rec2 %.3f Gcyc; panels %llu entries %llu groups %llu rows1 %llu rows2 %llu\n",t_gather/1e9,t_plan/1e9,t_rec1/1e9,t_rec2/1e9,(unsigned long long)panels,(unsigned long long)entries,(unsigned long long)groups,(unsigned long long)rows1,(unsigned long long)rows2);}
 #endif
     // Next emitted group: view-one records of one panel row against the view-two records it matches at length plen.
+    // Restores the records of panel row e (all its occurrences) once per panel.
+    void build_row(uint32_t e){
+        const size_t at=arena.size()/pb2;size_t cnt=0;
+        for(uint64_t j=0;j<m1[e];++j){
+            arena.resize((at+cnt+1)*pb2);
+            if(record(d1,tc1,e,j,false,arena.data()+(at+cnt)*pb2))++cnt;
+        }
+        arena.resize((at+cnt)*pb2);arena_at[e]=uint32_t(at);arena_n[e]=uint32_t(cnt);built[e]=1;
+    }
+    bool next_self(UnionGroup&g){
+        for(;;){
+            if(task_at<scratch.stasks.size()){
+                const auto&t=scratch.stasks[task_at++];
+                uint64_t before=0,nq=0;rec2.clear();
+                for(uint32_t r=t.r0;r<t.r1;++r){
+                    if(!built[r])build_row(r);
+                    const auto cnt=arena_n[r];
+                    if(r<t.g0)before+=cnt;else if(r<t.g1)nq+=cnt;
+                    rec2.insert(rec2.end(),arena.begin()+size_t(arena_at[r])*pb2,arena.begin()+size_t(arena_at[r]+cnt)*pb2);
+                }
+                const uint64_t n2=rec2.size()/pb2;
+                if(!nq||!n2)continue;
+                g={t.plen,nq,n2,rec2.data()+before*pb2,rec2.data(),pb2,pb2};return true;
+            }
+            if(!load_panel())return false;
+        }
+    }
     bool next(UnionGroup&g){
+        if(plan->self)return next_self(g);
         for(;;){
             if(task_at<scratch.tasks.size()){
-                const auto&t=scratch.tasks[task_at++];
+                const auto&t=scratch.tasks[task_at];if(!tkeep[task_at++])continue;
                 SXGC_TICK(uint64_t c0);
                 const uint64_t cap1=m1[t.entry];rec1.resize(cap1*pb1);uint64_t n1=0;
                 for(uint64_t j=0;j<cap1;++j)if(record(d1,tc1,t.entry,j,keep1_forward,rec1.data()+n1*pb1))++n1;

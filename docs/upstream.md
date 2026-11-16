@@ -24,6 +24,17 @@ optional complete seed audit. The corrected native baseline also contains:
 * compute-budget hooks (`src/sxgc_gate.h`): the section threads of `GIXmake`, the bucket sorts of `MSDsort` and the stream emitter
   take a token of the construction stage's shared pool while they compute and give it back around blocking pipe writes; without
   `SXGC_BUDGET_GATE` they are no-ops and the programs behave as upstream.
+* a work-conserving seed search: the units of work are the seeds of one (A contig, B contig, strand) pair, cut into
+  slabs at restart points of the chain scan; a producer thread loads and sorts the next parts within the memory of the
+  largest part while the searchers take tasks block by block in B-contig order from one shared, budgeted contig cache.
+  The searchers and the part-loading threads (reimport, `rmsd_sort` through hooks in `RSDsort.c`, cut) share a pool of
+  `-T` compute tokens, so no more than `-T` threads compute at once.
+* contig tails end in a sentinel: upstream reuses per-thread contig buffers, and a search box that starts past the end of
+  a shorter contig reads leftover bytes of a longer one loaded before, so the output can depend on the load order
+  (1 record in 296,590 of a *D. melanogaster* self-alignment). The reference output for self-alignments is therefore
+  upstream FastGA with this fix alone.
+* `MSDsort` waits on its condition variables in a `while` loop instead of an `if`, so a spurious or stolen wake-up
+  can no longer let a sorter thread run ahead.
 * checked output writes: `ALNtoPAF`/`ALNtoPSL` verify their part files and standard output (flush, `ferror`, `fclose`),
   the ONE library verifies flush and close of every file it writes, `FAtoGDB` verifies the `.bps` sequence file,
   and `FastGA`/`GIXmake` write seed and index files with a retrying full-write helper. Each failure prints the program,

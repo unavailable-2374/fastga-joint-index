@@ -313,8 +313,8 @@ Bytes unpack_meta(const Archive &a){
     uint64_t off=u64(a.h.data()+48),len=u64(a.h.data()+56),rawlen=u64(a.h.data()+64);
     if(off<HEADER||off>a.f->size||len>a.f->size-off||rawlen<16||rawlen>140000000||!len)
         fail("invalid shared metadata bounds");
-    Bytes packed=read_at(a.f->fd,off,len),raw(rawlen);uLongf n=rawlen;
-    if(uncompress(raw.data(),&n,packed.data(),packed.size())!=Z_OK||n!=rawlen||crc(raw)!=u32(a.h.data()+72))
+    Bytes packed=read_at(a.f->fd,off,len),raw(rawlen);
+    if(!sxgc_positions::inflate_exact(raw.data(),raw.size(),packed.data(),packed.size())||crc(raw)!=u32(a.h.data()+72))
         fail("shared metadata checksum mismatch");
     return raw;
 }
@@ -815,10 +815,12 @@ extern "C" uint64_t sxgc_joint_row(const unsigned char*p){return sg::u64(p+17);}
 extern "C" void sxgc_joint_fetch(Kmer_Stream*s,uint64_t row,unsigned char*out){sg::fatal([&]{auto state=dynamic_cast<sg::JointStream*>(static_cast<sg::StreamState*>(s->shared));if(!state)sg::fail("weighted locate requires a joint stream");state->fetch(row,out);});}
 extern "C" void sxgc_joint_fetch_range(Kmer_Stream*s,uint64_t row,uint64_t count,unsigned char*out){sg::fatal([&]{auto state=dynamic_cast<sg::JointStream*>(static_cast<sg::StreamState*>(s->shared));if(!state)sg::fail("weighted locate requires a joint stream");state->fetch_range(row,count,out);});}
 extern "C" void *sxgc_union_plan(Kmer_Stream*t1,Kmer_Stream*t2,int64_t freq,int flip){return sg::fatal([&]()->void*{auto p=sg::union_plan(t1,t2,uint64_t(freq),flip!=0);return p?new std::shared_ptr<sg::UnionPlan>(std::move(p)):nullptr;});}
+extern "C" void *sxgc_union_plan_self(Kmer_Stream*t1,int64_t freq){return sg::fatal([&]()->void*{auto p=sg::union_plan_self(t1,uint64_t(freq));return p?new std::shared_ptr<sg::UnionPlan>(std::move(p)):nullptr;});}
 extern "C" void sxgc_union_plan_free(void*plan){delete static_cast<std::shared_ptr<sg::UnionPlan>*>(plan);}
 extern "C" void *sxgc_union_worker(void*plan){return sg::fatal([&]()->void*{return new sg::UnionWorker(*static_cast<std::shared_ptr<sg::UnionPlan>*>(plan));});}
 extern "C" void sxgc_union_worker_free(void*worker){delete static_cast<sg::UnionWorker*>(worker);}
 extern "C" int sxgc_union_next(void*worker,Sxgc_Group*out){return sg::fatal([&]()->int{sg::UnionGroup g;if(!static_cast<sg::UnionWorker*>(worker)->next(g))return 0;out->plen=int(g.plen);out->n1=g.n1;out->n2=g.n2;out->t1=g.t1;out->t2=g.t2;out->stride1=g.stride1;out->stride2=g.stride2;return 1;});}
+extern "C" void sxgc_set_threads(int threads){jc::g_reader_threads.store(threads>0?unsigned(threads):0u);}
 extern "C" int sxgc_union_progress(void*worker){return static_cast<sg::UnionWorker*>(worker)->progress();}
 extern "C" int sxgc_stream_find(Kmer_Stream *s,const unsigned char *key){return sg::fatal([&]{
     int prefix=(unsigned(key[0])<<16)|(unsigned(key[1])<<8)|key[2];int64_t lo=prefix?s->index[prefix-1]:0,hi=s->index[prefix];

@@ -40,7 +40,7 @@ diff --git a/FastGA.c b/FastGA.c
  
  static void Clean_Exit(int status)
  { char *command;
-@@ -195,6 +209,17 @@
+@@ -195,6 +209,89 @@
    exit (status);
  }
  
@@ -55,10 +55,82 @@ diff --git a/FastGA.c b/FastGA.c
 +    }
 +}
 +
++//  Compute budget of the seed search.  While the NTHREADS searchers work, the producer loads,
++//  sorts and cuts the next part with NTHREADS threads of its own, so without a budget up to
++//  2*NTHREADS threads would compute at once.  A thread computes only while it holds one of
++//  NTHREADS tokens.  The part-loading threads (the producer's serial steps, reimport, rmsd_sort
++//  and cut) take theirs first ("hi"), so that the next part is ready before the searchers run
++//  out of tasks; a searcher holds a token while it runs tasks and gives it back when it waits for
++//  work or, after a task, when a part-loading thread waits.  A thread never waits for a token
++//  while it holds Sched.lock.  Outside the search the gate is off and every call is a no-op.
++
++typedef struct
++  { pthread_mutex_t lock;
++    pthread_cond_t  hi, lo;
++    int  free;      //  tokens not held
++    int  hiwait;    //  part-loading threads waiting for a token
++    int  lowait;    //  searchers waiting for a token
++    int  active;    //  tokens held
++    int  peak;      //  maximum of active
++  } Gate;
++
++static Gate SGATE = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER,
++                      0, 0, 0, 0, 0 };
++static int  SGATE_ON = 0;    //  set before and cleared after the search threads exist
++
++static void gate_acquire(int hi)
++{ if (!SGATE_ON)
++    return;
++  pthread_mutex_lock(&SGATE.lock);
++  if (hi)
++    { SGATE.hiwait += 1;
++      while (SGATE.free == 0)
++        pthread_cond_wait(&SGATE.hi,&SGATE.lock);
++      SGATE.hiwait -= 1;
++    }
++  else
++    { SGATE.lowait += 1;
++      while (SGATE.free == 0 || SGATE.hiwait > 0)
++        pthread_cond_wait(&SGATE.lo,&SGATE.lock);
++      SGATE.lowait -= 1;
++    }
++  SGATE.free -= 1;
++  if (++SGATE.active > SGATE.peak)
++    SGATE.peak = SGATE.active;
++  if (SGATE.free > 0)              //  a wake-up may have gone to a thread that found no token
++    { if (SGATE.hiwait > 0)
++        pthread_cond_signal(&SGATE.hi);
++      else if (SGATE.lowait > 0)
++        pthread_cond_signal(&SGATE.lo);
++    }
++  pthread_mutex_unlock(&SGATE.lock);
++}
++
++static void gate_release(void)
++{ if (!SGATE_ON)
++    return;
++  pthread_mutex_lock(&SGATE.lock);
++  SGATE.free   += 1;
++  SGATE.active -= 1;
++  if (SGATE.hiwait > 0)
++    pthread_cond_signal(&SGATE.hi);
++  else if (SGATE.lowait > 0)
++    pthread_cond_signal(&SGATE.lo);
++  pthread_mutex_unlock(&SGATE.lock);
++}
++
++static int gate_contended(void)
++{ return (SGATE_ON && __atomic_load_n(&SGATE.hiwait,__ATOMIC_RELAXED) > 0); }
++
++//  rmsd_sort (RSDsort.c) takes a token per sort task through these hooks.
++
++extern void (*rmsd_gate_acquire)(int hi);
++extern void (*rmsd_gate_release)(void);
++
  
  /***********************************************************************************************
   *
-@@ -279,6 +304,23 @@
+@@ -279,6 +376,23 @@
    int    f, p;
    char  *dir, *root, *full;
    int    pb, cb, nfile, freq;
@@ -82,7 +154,7 @@ diff --git a/FastGA.c b/FastGA.c
  
    dir  = PathTo(name);
    root = Root(name,".gix");
-@@ -605,10 +647,19 @@
+@@ -605,10 +719,19 @@
      IOBuffer    *cunit;
      int64        nhits;
      int64        tseed;
@@ -102,7 +174,7 @@ diff --git a/FastGA.c b/FastGA.c
    int tid          = parm->tid;
    int flip         = parm->flip;
    uint8 *cache     = parm->cache;
-@@ -622,6 +673,15 @@
+@@ -622,6 +745,15 @@
    int     cpre;
    uint8  *ctop, *suf1;
    int     kbyte, kfreq;
@@ -118,7 +190,7 @@ diff --git a/FastGA.c b/FastGA.c
  
    int     eorun, plen, mlen;
    uint8  *rcur, *rend;
-@@ -658,7 +718,7 @@
+@@ -658,7 +790,7 @@
  
    nhits  = 0;
    tseed  = 0;
@@ -127,7 +199,7 @@ diff --git a/FastGA.c b/FastGA.c
    kfreq  = FREQ * kbyte;
  
    acont = 0;
-@@ -701,7 +761,7 @@
+@@ -701,7 +833,7 @@
            //  skip remainder of cache and T2 entries < T1->cpre
  
            cpre = T1->cpre;
@@ -136,7 +208,7 @@ diff --git a/FastGA.c b/FastGA.c
              Next_Kmer_Entry(T2);
  
  #ifdef DEBUG_MERGE
-@@ -711,6 +771,13 @@
+@@ -711,6 +843,13 @@
  
            //  load cache with T2 entries = T1->cpre
  
@@ -150,7 +222,7 @@ diff --git a/FastGA.c b/FastGA.c
            for (cp = cache; T2->cpre == cpre; cp += kbyte)
              { memcpy(cp,T2->csuf,kbyte);
                Next_Kmer_Entry(T2);
-@@ -814,7 +881,11 @@
+@@ -814,7 +953,11 @@
  #endif
  
      pairs:                                        //  Push pairs
@@ -163,7 +235,7 @@ diff --git a/FastGA.c b/FastGA.c
          {
  #ifdef DEBUG_MERGE
            printf("      %lld: Freq %ld\n",T1->cidx,(hgh-low)/kbyte);
-@@ -830,6 +901,15 @@
+@@ -830,6 +973,15 @@
  #endif
            continue;
          }
@@ -179,7 +251,7 @@ diff --git a/FastGA.c b/FastGA.c
        if (flip)
          { int       adest, bsign;
            IOBuffer *ou;
-@@ -837,7 +917,7 @@
+@@ -837,7 +989,7 @@
  
            pay1 = suf1+PAYOFF;
            bsign = (pay1[JSIGN] & 0x80);
@@ -188,7 +260,7 @@ diff --git a/FastGA.c b/FastGA.c
              {
  #ifdef DEBUG_MERGE
                if (fst_in)
-@@ -879,10 +959,10 @@
+@@ -879,10 +1031,10 @@
                ou->buck[acont] += 1;
  
                if (btop >= ou->bend)
@@ -202,7 +274,7 @@ diff --git a/FastGA.c b/FastGA.c
                        Clean_Exit(1);
                      }
                    ou->btop = ou->bufr;
-@@ -930,7 +1010,7 @@
+@@ -930,7 +1082,7 @@
    
            adest = Select[acont];
    
@@ -211,7 +283,7 @@ diff --git a/FastGA.c b/FastGA.c
              {
  #ifdef DEBUG_MERGE
                if (fst_in)
-@@ -971,10 +1051,10 @@
+@@ -971,10 +1123,10 @@
                ou->buck[acont] += 1;
    
                if (btop >= ou->bend)
@@ -225,7 +297,7 @@ diff --git a/FastGA.c b/FastGA.c
                        Clean_Exit(1);
                      }
                    ou->btop = ou->bufr;
-@@ -1005,24 +1085,192 @@
+@@ -1005,24 +1157,192 @@
  
      for (j = 0; j < NPARTS; j++)
        { if (nunit[j].btop > nunit[j].bufr)
@@ -424,7 +496,7 @@ diff --git a/FastGA.c b/FastGA.c
  
  static void *old_merge_thread(void *args)
  { SP *parm = (SP *) args;
-@@ -1387,10 +1635,10 @@
+@@ -1387,10 +1707,10 @@
                    ou->buck[acont] += 1;
    
                    if (btop >= ou->bend)
@@ -438,7 +510,7 @@ diff --git a/FastGA.c b/FastGA.c
                            Clean_Exit(1);
                          }
                        ou->btop = ou->bufr;
-@@ -1474,10 +1722,10 @@
+@@ -1474,10 +1794,10 @@
  #endif
    
                    if (btop >= ou->bend)
@@ -452,7 +524,7 @@ diff --git a/FastGA.c b/FastGA.c
                            Clean_Exit(1);
                          }
                        ou->btop = ou->bufr;
-@@ -1520,15 +1768,15 @@
+@@ -1520,15 +1840,15 @@
  
      for (j = 0; j < NPARTS; j++)
        { if (nunit[j].btop > nunit[j].bufr)
@@ -474,7 +546,7 @@ diff --git a/FastGA.c b/FastGA.c
                Clean_Exit(1);
              }
        }
-@@ -1851,10 +2099,10 @@
+@@ -1851,10 +2171,10 @@
              ou->buck[icont] += 1;
    
              if (btop >= ou->bend)
@@ -488,7 +560,7 @@ diff --git a/FastGA.c b/FastGA.c
                      Clean_Exit(1);
                    }
                  ou->btop = ou->bufr;
-@@ -1889,15 +2137,15 @@
+@@ -1889,15 +2209,15 @@
  
      for (j = 0; j < NPARTS; j++)
        { if (nunit[j].btop > nunit[j].bufr)
@@ -510,7 +582,7 @@ diff --git a/FastGA.c b/FastGA.c
                Clean_Exit(1);
              }
        }
-@@ -2218,10 +2466,10 @@
+@@ -2218,10 +2538,10 @@
                  ou->buck[icont] += 1;
  
                  if (btop >= ou->bend)
@@ -524,7 +596,7 @@ diff --git a/FastGA.c b/FastGA.c
                          Clean_Exit(1);
                        }
                      ou->btop = ou->bufr;
-@@ -2258,15 +2506,15 @@
+@@ -2258,15 +2578,15 @@
  
      for (j = 0; j < NPARTS; j++)
        { if (nunit[j].btop > nunit[j].bufr)
@@ -546,7 +618,7 @@ diff --git a/FastGA.c b/FastGA.c
                Clean_Exit(1);
              }
        }
-@@ -2357,7 +2605,14 @@
+@@ -2357,7 +2677,14 @@
        bzero(nu[0].buck,sizeof(int64)*NCONTS);
        bzero(cu[0].buck,sizeof(int64)*NCONTS);
        parm[i].flip = 0;
@@ -561,7 +633,7 @@ diff --git a/FastGA.c b/FastGA.c
  
    nhits = tseed = 0;
  
-@@ -2375,7 +2630,7 @@
+@@ -2375,7 +2702,7 @@
          new_merge_thread(parm+i);
  #else
        for (i = 1; i < NTHREADS; i++)
@@ -570,7 +642,7 @@ diff --git a/FastGA.c b/FastGA.c
        new_merge_thread(parm);
  
        for (i = 1; i < NTHREADS; i++)
-@@ -2389,7 +2644,7 @@
+@@ -2389,7 +2716,7 @@
          old_merge_thread(parm+i);
  #else
        for (i = 1; i < NTHREADS; i++)
@@ -579,7 +651,7 @@ diff --git a/FastGA.c b/FastGA.c
        old_merge_thread(parm);
  
        for (i = 1; i < NTHREADS; i++)
-@@ -2406,6 +2661,12 @@
+@@ -2406,6 +2733,12 @@
      { nhits += parm[i].nhits;
        tseed += parm[i].tseed;
      }
@@ -592,7 +664,7 @@ diff --git a/FastGA.c b/FastGA.c
  
    if (SYMMETRIC)
      { if (VERBOSE)
-@@ -2428,6 +2689,12 @@
+@@ -2428,6 +2761,12 @@
  
            parm[i].flip = 1;
          }
@@ -605,7 +677,7 @@ diff --git a/FastGA.c b/FastGA.c
  
        if (NEW_GIX)
          {
-@@ -2436,7 +2703,7 @@
+@@ -2436,7 +2775,7 @@
              new_merge_thread(parm+i);
  #else
            for (i = 1; i < NTHREADS; i++)
@@ -614,7 +686,7 @@ diff --git a/FastGA.c b/FastGA.c
            new_merge_thread(parm);
  
            for (i = 1; i < NTHREADS; i++)
-@@ -2450,7 +2717,7 @@
+@@ -2450,7 +2789,7 @@
              old_merge_thread(parm+i);
  #else
            for (i = 1; i < NTHREADS; i++)
@@ -623,7 +695,7 @@ diff --git a/FastGA.c b/FastGA.c
            old_merge_thread(parm);
  
            for (i = 1; i < NTHREADS; i++)
-@@ -2467,6 +2734,12 @@
+@@ -2467,6 +2806,12 @@
          { nhits += parm[i].nhits;
            tseed += parm[i].tseed;
          }
@@ -636,7 +708,7 @@ diff --git a/FastGA.c b/FastGA.c
      }
     
    free(cache);
-@@ -2493,6 +2766,99 @@
+@@ -2493,6 +2838,174 @@
  }
  
  
@@ -731,12 +803,87 @@ diff --git a/FastGA.c b/FastGA.c
 +    }
 +  free(records); parm->nhits = nhits; parm->tseed = tseed; return NULL;
 +}
++
++/* Self matching by the union-LCP walk (see union_merge_thread): one group per query group (a run of equal keys, or one
++   occurrence) with its candidate range; every query occurrence is paired with every other record of the range, exactly
++   as joint_self_merge_thread does. The query records lie inside the range records (t1 = t2 + k records). */
++static void *union_self_merge_thread(void *args)
++{ SP *parm = (SP *) args;
++  IOBuffer *normal = parm->nunit, *inverse = parm->cunit;
++  void     *worker = sxgc_union_worker(parm->plan);
++  Sxgc_Group grp;
++  int       qcnt = -1, pcnt, j;
++  int64     nhits = 0, tseed = 0;
++
++  for (j = 0; j < NPARTS; j++)
++    { normal[j].bend = normal[j].bufr + (1000000-(IBYTE+JBYTE+1));
++      normal[j].btop = normal[j].bufr;
++      inverse[j].bend = inverse[j].bufr + (1000000-(IBYTE+JBYTE+1));
++      inverse[j].btop = inverse[j].bufr;
++    }
++  while (sxgc_union_next(worker,&grp))
++    { int      length = grp.plen;
++      int      threshold = SOFT_MASK ? length : KMER+1;
++      uint64_t q, t, qoff = (uint64_t) ((grp.t1-grp.t2)/grp.stride2);
++
++      if (VERBOSE && parm->tid == 0)
++        { pcnt = sxgc_union_progress(worker);
++          if (pcnt > qcnt)
++            { fprintf(stderr,"\r    Completed %3d%%",pcnt);
++              fflush(stderr);
++            }
++          qcnt = pcnt;
++        }
++      for (q = 0; q < grp.n1; q++)
++        { const uint8 *query = grp.t1 + q*grp.stride1, *pay = query+PAYOFF;
++          int      sign, destination;
++          uint64_t contig = 0;
++          if (query[CBYTE] >= threshold) continue;
++          sign = pay[ISIGN]&0x80;
++          memcpy(&contig,pay+IPOST,ICONT);
++          contig &= ~(((uint64_t) 0x80) << (8*(ICONT-1)));
++          destination = Select[contig];
++          for (t = 0; t < grp.n2; t++)
++            { const uint8 *target = grp.t2 + t*grp.stride2, *post = target+PAYOFF;
++              IOBuffer *unit;
++              uint8    *out;
++              if (t == qoff+q || target[CBYTE] >= threshold) continue;
++              unit = ((post[JSIGN]&0x80) == sign ? normal : inverse) + destination;
++              out = unit->btop; *out++ = length;
++              memcpy(out,pay,IBYTE); out[ISIGN] &= 0x7f; out += IBYTE;
++              memcpy(out,post,JBYTE); out += JBYTE;
++              unit->buck[contig]++; nhits++; tseed += length;
++              if (out >= unit->bend)
++                { if (sj_write_all(unit->file,unit->bufr,out-unit->bufr) < 0)
++                    { fprintf(stderr,"%s: IO write to a seed file in %s failed: %s\n",
++                                     Prog_Name,SORT_PATH,strerror(errno));
++                      Clean_Exit(1);
++                    }
++                  unit->btop = unit->bufr;
++                }
++              else unit->btop = out;
++            }
++        }
++    }
++  for (j = 0; j < NPARTS; j++)
++    { if (normal[j].btop > normal[j].bufr && sj_write_all(normal[j].file,normal[j].bufr,normal[j].btop-normal[j].bufr) < 0)
++        { fprintf(stderr,"%s: IO write to a seed file in %s failed: %s\n",Prog_Name,SORT_PATH,strerror(errno));
++          Clean_Exit(1);
++        }
++      if (inverse[j].btop > inverse[j].bufr && sj_write_all(inverse[j].file,inverse[j].bufr,inverse[j].btop-inverse[j].bufr) < 0)
++        { fprintf(stderr,"%s: IO write to a seed file in %s failed: %s\n",Prog_Name,SORT_PATH,strerror(errno));
++          Clean_Exit(1);
++        }
++    }
++  sxgc_union_worker_free(worker);
++  parm->nhits = nhits; parm->tseed = tseed; return NULL;
++}
 +#endif
 +
  static void self_adaptamer_merge(Kmer_Stream *T1, Post_List *P1, int64 g1len)
  { SP         parm[NTHREADS];
  #ifndef DEBUG_MERGE
-@@ -2500,7 +2866,10 @@
+@@ -2500,7 +3013,10 @@
  #endif
    uint8     *cache;
    int64      nhits, tseed;
@@ -748,7 +895,7 @@ diff --git a/FastGA.c b/FastGA.c
  
    if (VERBOSE)
      { fprintf(stderr,"  Starting adaptive seed merge\n");
-@@ -2544,7 +2913,7 @@
+@@ -2544,7 +3060,7 @@
          parm[i].P1 = Clone_Post_List(P1);
      }
  
@@ -757,7 +904,7 @@ diff --git a/FastGA.c b/FastGA.c
    if (cache == NULL)
      Clean_Exit(1);
  
-@@ -2552,13 +2921,21 @@
+@@ -2552,13 +3068,25 @@
      { IOBuffer *nu, *cu;
  
        parm[i].tid   = i;
@@ -771,16 +918,20 @@ diff --git a/FastGA.c b/FastGA.c
  
 +#ifdef SXGC_SHARED_GIX
 +  if (joint)
-+    { for (i = 1; i < NTHREADS; i++) Spawn(threads+i,joint_self_merge_thread,parm+i);
-+      joint_self_merge_thread(parm);
++    { void *plan = sxgc_union_plan_self(T1,FREQ);
++      void *(*body)(void *) = plan != NULL ? union_self_merge_thread : joint_self_merge_thread;
++      for (i = 0; i < NTHREADS; i++) parm[i].plan = plan;
++      for (i = 1; i < NTHREADS; i++) Spawn(threads+i,body,parm+i);
++      body(parm);
 +      for (i = 1; i < NTHREADS; i++) pthread_join(threads[i],NULL);
++      if (plan != NULL) sxgc_union_plan_free(plan);
 +    }
 +  else
 +#endif
    if (NEW_GIX)
      {
  #ifdef DEBUG_MERGE
-@@ -2566,7 +2943,7 @@
+@@ -2566,7 +3094,7 @@
          new_self_merge_thread(parm+i);
  #else
        for (i = 1; i < NTHREADS; i++)
@@ -789,7 +940,7 @@ diff --git a/FastGA.c b/FastGA.c
        new_self_merge_thread(parm);
  
        for (i = 1; i < NTHREADS; i++)
-@@ -2580,7 +2957,7 @@
+@@ -2580,7 +3108,7 @@
          old_self_merge_thread(parm+i);
  #else
        for (i = 1; i < NTHREADS; i++)
@@ -798,7 +949,21 @@ diff --git a/FastGA.c b/FastGA.c
        old_self_merge_thread(parm);
  
        for (i = 1; i < NTHREADS; i++)
-@@ -2956,6 +3333,7 @@
+@@ -2746,6 +3274,13 @@
+   return (NULL);
+ }
+ 
++static void *reimport_gated(void *args)
++{ gate_acquire(1);
++  reimport_thread(args);
++  gate_release();
++  return (NULL);
++}
++
+ void print_seeds(uint8 *sarray, int swide, Range *range, int64 *panel,
+                  GDB *gdb1, GDB *gdb2, int comp)
+ { uint8 *e, *x;
+@@ -2956,6 +3491,7 @@
      Align_Spec *spec;           //  alignment spec
      Alignment   align;          //  alignment record
      Overlap     ovl;            //  overlap record
@@ -806,20 +971,29 @@ diff --git a/FastGA.c b/FastGA.c
  
    } Contig_Bundle;
  
-@@ -2966,12 +3344,172 @@
+@@ -2966,12 +3502,578 @@
    return (ol->path.abpos - or->path.abpos);
  }
  
 +//  Decoded contigs shared by the search threads.  A contig is decoded once (reverse-complemented
 +//  for the A side of the minus strand) and then only read, so threads working on slabs of the same
 +//  contig pair share it instead of each decoding its own copy.  The aligner may probe a few
-+//  positions beyond the end of a contig (a box can start past the end); the whole block is
-+//  therefore filled with the end-of-sequence code before decoding, so what lies beyond the
-+//  terminator is the same whatever contigs were processed before (a per-thread buffer used to
-+//  keep the tail of the previously loaded, longer contig there).
++//  positions beyond the end of a contig (a box can start past the end); the byte before the
++//  sequence and the CONTIG_TAIL bytes after it are therefore set to the end-of-sequence code,
++//  so what lies beyond the terminator is the same whatever contigs were processed before (a
++//  per-thread buffer used to keep the tail of the previously loaded, longer contig there).
++//
++//  Only the contigs referenced by running tasks have to stay resident.  A cache that keeps
++//  released contigs up to a fixed size simply adds that size to the peak RSS (6 GiB, filled on
++//  every pair tried, 3.7 GiB above the original FastGA on maize B73 x Mo17), while what it saves
++//  depends on the task order: in the order of the sorted array, with a small cache, maize Mo17
++//  against B73 decodes about 9 TB, since every A contig hits most large B contigs (see
++//  block_order, which brings this to some hundred GB).  Released contigs are therefore kept only
++//  in memory the process has already used at its peak (see cc_allow), and at least
++//  CONTIG_CACHE_BYTES of them, enough for the small contigs that neighbouring contig pairs share.
 +
 +#ifndef CONTIG_CACHE_BYTES
-+#define CONTIG_CACHE_BYTES  (6ll<<30)    //  Unreferenced contigs are evicted beyond this
++#define CONTIG_CACHE_BYTES  (64ll<<20)   //  Released contigs always allowed
 +#endif
 +#define CONTIG_TAIL  4096
 +
@@ -829,38 +1003,188 @@ diff --git a/FastGA.c b/FastGA.c
 +    int     comp;
 +    char   *base;       //  allocated block, sequence starts at base+1
 +    char   *seq;
-+    int64   size;
++    int64   size;       //  block size (a size class, see cc_class)
 +    int     refs;
 +    int     ready;
++    int     armed;      //  tail filled: decode chunks may be claimed
++    int     nchunk;     //  decode work: chunks [0,nchunk) of chunk bases
++    int     nextc;      //  next chunk to claim (atomic)
++    int     donec;      //  chunks decoded (atomic)
++    int64   chunk;
++    int64   len;
 +    int64   stamp;
++    pthread_cond_t done;  //  signalled when the entry becomes ready
 +  } CEntry;
 +
 +static pthread_mutex_t CC_lock  = PTHREAD_MUTEX_INITIALIZER;
-+static pthread_cond_t  CC_ready = PTHREAD_COND_INITIALIZER;
 +static CEntry **CC_ent;
 +static int      CC_n, CC_cap;
-+static int64    CC_bytes, CC_clock;
++static int64    CC_bytes, CC_idle, CC_clock;   //  bytes of all blocks, of released ones
++static int      CC_track;                      //  allowance follows the peak RSS (search phase)
 +
-+static CEntry *contig_acquire(GDB *gdb, int g, int ctg, int comp)
-+{ CEntry *e;
-+  int     i;
-+  int64   len = gdb->contigs[ctg].clen;
++//  A contig that is not in the cache takes over the block of the least recently used released
++//  entry of its size class when there is one: decoding into it again costs an unpack, while a
++//  new block costs a page fault for every 4 KiB on top (seen as up to 70% system time when
++//  several hundred GB were decoded into fresh blocks).  Otherwise the least recently used
++//  released entries are freed until the released ones fit in the allowance (cc_allow), and a
++//  new block is allocated.  Blocks are freed outside the lock.
++//
++//  Threads that need a contig being decoded decode chunks of it too instead of waiting for the
++//  thread that started it: the contig is cut into about NTHREADS chunks (of CC_CHUNK_MIN to
++//  CC_CHUNK_MAX bases), claimed without the lock, so a contig is ready after a small fraction of
++//  the single-thread decode time.  The pieces are the same bytes a whole-contig decode produces
++//  (the reverse complement of the contig is written to the mirrored position).
++//
++//  Blocks of a MB or more are mapped and unmapped directly: the allocator would serve contigs
++//  below its mmap threshold (which it raises dynamically up to 32 MB) from per-thread arenas,
++//  where the freed blocks of 24 threads stay resident and fragment.  Their sizes are rounded up
++//  to one of 8 classes per power of two (at most 12.5% more), so that a released block fits
++//  the next contig of similar length.
 +
-+  pthread_mutex_lock(&CC_lock);
-+  for (i = 0; i < CC_n; i++)
-+    { e = CC_ent[i];
-+      if (e->g == g && e->ctg == ctg && e->comp == comp)
-+        { e->refs += 1;
-+          e->stamp = ++CC_clock;
-+          while (!e->ready)
-+            pthread_cond_wait(&CC_ready,&CC_lock);
-+          pthread_mutex_unlock(&CC_lock);
-+          return (e);
-+        }
++#define CC_MAP_MIN    (1ll<<20)
++#define CC_CHUNK_MIN  (64ll<<10)   //  bases per decode chunk (multiples of 4)
++#define CC_CHUNK_MAX  (1ll<<20)
++
++static int64 cc_class(int64 need)
++{ int64 g;
++
++  if (need < CC_MAP_MIN)
++    return (need);
++  for (g = 1; (g << 4) <= need; g <<= 1)
++    ;
++  return (((need + g-1) / g) * g);   //  g = 2^(floor(log2 need) - 3)
++}
++
++static char *cc_new_block(int64 size)
++{ if (size < CC_MAP_MIN)
++    return ((char *) malloc(size));
++  { void *m = mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
++
++    return (m == MAP_FAILED ? NULL : (char *) m);
++  }
++}
++
++static void cc_free_block(char *base, int64 size)
++{ if (size < CC_MAP_MIN)
++    free(base);
++  else
++    munmap(base,size);
++}
++
++//  Give a block that is to be reused another size, keeping its pages as far as they reach.
++
++#ifndef MREMAP_MAYMOVE
++#define MREMAP_MAYMOVE 1
++extern void *mremap(void *old, size_t olen, size_t nlen, int flags, ...);
++#endif
++
++static char *cc_resize_block(char *base, int64 size, int64 nsize)
++{ char *n;
++
++  if (nsize == size)
++    return (base);
++  if (size >= CC_MAP_MIN && nsize >= CC_MAP_MIN)
++    { void *m = mremap(base,size,nsize,MREMAP_MAYMOVE);
++
++      return (m == MAP_FAILED ? NULL : (char *) m);
 +    }
++  if (size < CC_MAP_MIN && nsize < CC_MAP_MIN)
++    return ((char *) realloc(base,nsize));
++  n = cc_new_block(nsize);
++  if (n != NULL)
++    cc_free_block(base,size);
++  return (n);
++}
 +
-+  while (CC_bytes + len + CONTIG_TAIL + 16 > CONTIG_CACHE_BYTES)
-+    { int best = -1;
++//  Released contigs are kept in memory the process has already used: their allowance is what
++//  they occupy now plus the distance of the resident set to a reference peak (less a margin for
++//  the other allocations of the threads), and at least CONTIG_CACHE_BYTES.  The reference is the
++//  peak RSS of the earlier phases or, when the search goes beyond it, the peak of the resident
++//  set less the blocks of the cache, so that the cache never sets the reference itself (a
++//  reference that included it would ratchet up with every transient allocation on top of a full
++//  cache).  The cache therefore does not raise the peak RSS, which the seed merge or the sorted
++//  parts set, beyond the referenced contigs and CONTIG_CACHE_BYTES, and keeps as many released
++//  contigs as the memory below that peak holds (on maize Mo17 against B73 the seed merge peaks
++//  1.5 GB above the search phase, enough to keep most of the B genome decoded).  extra is memory
++//  about to be taken by the caller.
++
++#define CC_MARGIN  (128ll<<20)
++
++static int64 cc_rss(void)
++{ static int64 page = 0;
++  long long    size, res;
++  FILE        *f;
++
++  if (page == 0)
++    page = sysconf(_SC_PAGESIZE);
++  f = fopen("/proc/self/statm","r");
++  if (f == NULL)
++    return (-1);
++  if (fscanf(f,"%lld %lld",&size,&res) != 2)
++    res = -1;
++  fclose(f);
++  return (res < 0 ? -1 : res*page);
++}
++
++//  CC_room, the distance to the peak, is measured at most every CC_REFRESH ns and follows the
++//  blocks the cache allocates and frees in between.
++
++#define CC_REFRESH  (10000000ll)
++
++static int64 CC_room, CC_room_t, CC_peak;
++
++static void cc_refresh(int force)
++{ struct timespec t;
++  int64           now, rss, nc, pk;
++
++  if (!CC_track)
++    return;
++  clock_gettime(CLOCK_MONOTONIC_COARSE,&t);
++  now = t.tv_sec*1000000000ll + t.tv_nsec;
++  if (!force && now - __atomic_load_n(&CC_room_t,__ATOMIC_RELAXED) < CC_REFRESH)
++    return;
++  __atomic_store_n(&CC_room_t,now,__ATOMIC_RELAXED);
++  rss = cc_rss();
++  if (rss < 0)
++    return;
++  nc = rss - __atomic_load_n(&CC_bytes,__ATOMIC_RELAXED);
++  pk = __atomic_load_n(&CC_peak,__ATOMIC_RELAXED);
++  while (nc > pk && !__atomic_compare_exchange_n(&CC_peak,&pk,nc,0,__ATOMIC_RELAXED,__ATOMIC_RELAXED))
++    ;
++  if (nc > pk)
++    pk = nc;
++  __atomic_store_n(&CC_room,pk - rss - CC_MARGIN,__ATOMIC_RELAXED);
++}
++
++//  Start following the peak: the peak of the earlier phases is the first reference.
++
++static void cc_track_start(void)
++{ struct rusage r;
++
++  CC_peak   = (getrusage(RUSAGE_SELF,&r) == 0 ? 1024ll*r.ru_maxrss : 0);
++  CC_room   = 0;
++  CC_room_t = 0;
++  CC_track  = 1;
++  cc_refresh(1);
++}
++
++static int64 cc_allow(int64 extra)    //  CC_lock held
++{ int64 a = 0;
++
++  if (CC_track)
++    a = CC_idle + __atomic_load_n(&CC_room,__ATOMIC_RELAXED) - extra;
++  return (a > CONTIG_CACHE_BYTES ? a : CONTIG_CACHE_BYTES);
++}
++
++//  Unlink released entries, least recently used first, until at most allow bytes of released
++//  blocks remain, or until room bytes more are free when room > 0 (CC_lock held).  The entries
++//  are put in *out (to be freed by cc_free_list after the lock is released).
++
++typedef struct { CEntry **e; int n, cap; } CList;
++
++static void cc_evict(int64 allow, CList *out)
++{ while (CC_idle > allow)
++    { int best = -1, i;
 +
 +      for (i = 0; i < CC_n; i++)
 +        if (CC_ent[i]->refs == 0 && CC_ent[i]->ready)
@@ -868,60 +1192,306 @@ diff --git a/FastGA.c b/FastGA.c
 +            best = i;
 +      if (best < 0)
 +        break;
-+      e = CC_ent[best];
-+      CC_bytes -= e->size;
-+      free(e->base);
-+      free(e);
++      if (out->n >= out->cap)
++        { out->cap = 2*out->cap + 16;
++          out->e   = (CEntry **) realloc(out->e,sizeof(CEntry *)*out->cap);
++          if (out->e == NULL)
++            { fprintf(stderr,"%s: Cannot allocate contig cache\n",Prog_Name);
++              Clean_Exit(1);
++            }
++        }
++      out->e[out->n++] = CC_ent[best];
++      CC_bytes -= CC_ent[best]->size;
++      CC_idle  -= CC_ent[best]->size;
 +      CC_ent[best] = CC_ent[--CC_n];
 +    }
++}
 +
-+  if (CC_n >= CC_cap)
-+    { CC_cap = 2*CC_cap + 64;
-+      CC_ent = (CEntry **) realloc(CC_ent,sizeof(CEntry *)*CC_cap);
-+      if (CC_ent == NULL)
-+        { fprintf(stderr,"%s: Cannot allocate contig cache\n",Prog_Name);
++static void cc_free_list(CList *l)
++{ int i;
++
++  for (i = 0; i < l->n; i++)
++    { __atomic_fetch_add(&CC_room,l->e[i]->size,__ATOMIC_RELAXED);
++      cc_free_block(l->e[i]->base,l->e[i]->size);
++      pthread_cond_destroy(&(l->e[i]->done));
++      free(l->e[i]);
++    }
++  free(l->e);
++}
++
++//  Free released contigs beyond the current allowance (the producer calls this when it takes
++//  memory for a new part).
++
++static void contig_trim(int64 extra)
++{ CList l = { NULL, 0, 0 };
++
++  cc_refresh(1);
++  pthread_mutex_lock(&CC_lock);
++  cc_evict(cc_allow(extra),&l);
++  pthread_mutex_unlock(&CC_lock);
++  cc_free_list(&l);
++}
++
++//  The 2-bit compressed sequence (read with pread from the .bps file, or in memory) is decoded
++//  straight into the block, four bases per byte through a table (with their reverse complement
++//  for the minus strand): one pass instead of the unpack into a buffer and the copy of
++//  Get_Contig_Piece, and the same bytes.
++
++static uint32         CC_tab[256], CC_rtab[256];
++static pthread_once_t CC_tab_once = PTHREAD_ONCE_INIT;
++
++static void cc_tab_init(void)
++{ int b, i;
++
++  for (b = 0; b < 256; b++)
++    { uint8 v[4], r[4];
++
++      for (i = 0; i < 4; i++)
++        v[i] = (uint8) ((b >> (2*i)) & 0x3);
++      for (i = 0; i < 4; i++)
++        r[i] = (uint8) (3 - v[3-i]);
++      memcpy(CC_tab+b,v,4);
++      memcpy(CC_rtab+b,r,4);
++    }
++}
++
++static __thread char  *CC_tmp;
++static __thread uint8 *CC_pak;
++
++static void cc_decode_chunk(CEntry *e, GDB *gdb, int c)
++{ int64 beg = c*e->chunk;
++  int64 end = beg + e->chunk;
++  int64 n, i;
++  char *tmp;
++
++  if (end > e->len)
++    end = e->len;
++  n = end - beg;
++  if (gdb->seqstate == COMPRESSED || (gdb->seqstate == EXTERNAL && gdb->seqs != NULL))
++    { int64  off = gdb->contigs[e->ctg].boff + beg/4;   //  beg % 4 == 0
++      int64  m   = n & ~3ll;
++      uint8 *p;
++
++      if (gdb->seqstate == COMPRESSED)
++        p = ((uint8 *) gdb->seqs) + off;
++      else
++        { int    fd  = fileno((FILE *) gdb->seqs);
++          int64  nb  = (n+3)/4;
++          int64  got = 0;
++
++          if (CC_pak == NULL)
++            { CC_pak = (uint8 *) malloc(CC_CHUNK_MAX/4+16);
++              if (CC_pak == NULL)
++                { fprintf(stderr,"%s: Cannot allocate contig decode buffer\n",Prog_Name);
++                  Clean_Exit(1);
++                }
++            }
++          while (got < nb)
++            { ssize_t r = pread(fd,CC_pak+got,nb-got,off+got);
++
++              if (r <= 0)
++                { fprintf(stderr,"%s: Failed read of GDB sequence file (contig cache)\n",Prog_Name);
++                  Clean_Exit(1);
++                }
++              got += r;
++            }
++          p = CC_pak;
++        }
++      pthread_once(&CC_tab_once,cc_tab_init);
++      if (e->comp)
++        { char *d = e->seq + (e->len - beg);   //  base beg+i goes to d[-1-i]
++
++          for (i = 0; i < m; i += 4)
++            memcpy(d-i-4,CC_rtab+p[i>>2],4);
++          for ( ; i < n; i++)
++            d[-1-i] = (char) (3 - ((p[i>>2] >> (2*(i&3))) & 0x3));
++        }
++      else
++        { char *d = e->seq + beg;
++
++          for (i = 0; i < m; i += 4)
++            memcpy(d+i,CC_tab+p[i>>2],4);
++          for ( ; i < n; i++)
++            d[i] = (char) ((p[i>>2] >> (2*(i&3))) & 0x3);
++        }
++      return;
++    }
++  if (CC_tmp == NULL)
++    { CC_tmp = (char *) malloc(CC_CHUNK_MAX+16);
++      if (CC_tmp == NULL)
++        { fprintf(stderr,"%s: Cannot allocate contig decode buffer\n",Prog_Name);
 +          Clean_Exit(1);
 +        }
 +    }
-+  e = (CEntry *) malloc(sizeof(CEntry));
-+  if (e == NULL)
-+    { fprintf(stderr,"%s: Cannot allocate contig cache entry\n",Prog_Name);
-+      Clean_Exit(1);
++  tmp = CC_tmp + 1;
++  if (Get_Contig_Piece(gdb,e->ctg,(int) beg,(int) end,NUMERIC,tmp) == NULL)
++    Clean_Exit(1);
++  if (e->comp)
++    { char *d = e->seq + (e->len - end);
++
++      for (i = 0; i < n; i++)
++        d[i] = (char) (3 - tmp[n-1-i]);
++    }
++  else
++    memcpy(e->seq+beg,tmp,n);
++}
++
++//  Called with CC_lock held; returns with it held once the entry is ready.
++
++static void cc_help(CEntry *e, GDB *gdb)
++{ while (!e->ready)
++    { if (e->armed && __atomic_load_n(&e->nextc,__ATOMIC_RELAXED) < e->nchunk)
++        { int c, last = 0;
++
++          pthread_mutex_unlock(&CC_lock);
++          while ((c = __atomic_fetch_add(&e->nextc,1,__ATOMIC_RELAXED)) < e->nchunk)
++            { cc_decode_chunk(e,gdb,c);
++              if (__atomic_add_fetch(&e->donec,1,__ATOMIC_ACQ_REL) == e->nchunk)
++                last = 1;
++            }
++          pthread_mutex_lock(&CC_lock);
++          if (last)
++            { e->ready = 1;
++              pthread_cond_broadcast(&e->done);
++            }
++        }
++      else
++        pthread_cond_wait(&e->done,&CC_lock);
++    }
++}
++
++static CEntry *contig_acquire(GDB *gdb, int g, int ctg, int comp)
++{ CEntry *e;
++  int     i, best;
++  int64   len   = gdb->contigs[ctg].clen;
++  int64   need  = cc_class(len + CONTIG_TAIL + 16);
++  CList   vict  = { NULL, 0, 0 };
++  int64   oldsize;
++
++  cc_refresh(0);
++  pthread_mutex_lock(&CC_lock);
++  for (i = 0; i < CC_n; i++)
++    { e = CC_ent[i];
++      if (e->g == g && e->ctg == ctg && e->comp == comp)
++        { if (e->refs++ == 0)
++            CC_idle -= e->size;
++          e->stamp = ++CC_clock;
++          cc_help(e,gdb);
++          pthread_mutex_unlock(&CC_lock);
++          return (e);
++        }
++    }
++
++  //  Reuse the least recently used released block of the right size, or, when released
++  //  contigs would have to be freed for a new block anyway, the least recently used released
++  //  block resized.
++
++  oldsize = 0;
++  best    = -1;
++  for (i = 0; i < CC_n; i++)
++    { CEntry *c = CC_ent[i];
++
++      if (c->refs == 0 && c->ready && c->size == need)
++        if (best < 0 || c->stamp < CC_ent[best]->stamp)
++          best = i;
++    }
++  if (best < 0 && CC_idle + need > cc_allow(0))
++    for (i = 0; i < CC_n; i++)
++      { CEntry *c = CC_ent[i];
++
++        if (c->refs == 0 && c->ready)
++          if (best < 0 || c->stamp < CC_ent[best]->stamp)
++            best = i;
++      }
++  if (best >= 0)
++    { e = CC_ent[best];
++      CC_idle  -= e->size;
++      oldsize   = e->size;
++      CC_bytes += need - e->size;
++      e->size   = need;
++      __atomic_fetch_sub(&CC_room,need - oldsize,__ATOMIC_RELAXED);
++      e->refs   = 1;
++      e->ready  = 0;
++      cc_evict(cc_allow(0),&vict);
++    }
++  else
++    { cc_evict(cc_allow(need),&vict);
++      if (CC_n >= CC_cap)
++        { CC_cap = 2*CC_cap + 64;
++          CC_ent = (CEntry **) realloc(CC_ent,sizeof(CEntry *)*CC_cap);
++          if (CC_ent == NULL)
++            { fprintf(stderr,"%s: Cannot allocate contig cache\n",Prog_Name);
++              Clean_Exit(1);
++            }
++        }
++      e = (CEntry *) malloc(sizeof(CEntry));
++      if (e == NULL)
++        { fprintf(stderr,"%s: Cannot allocate contig cache entry\n",Prog_Name);
++          Clean_Exit(1);
++        }
++      pthread_cond_init(&e->done,NULL);
++      e->size = need;
++      e->base = NULL;
++      CC_ent[CC_n++] = e;
++      CC_bytes += e->size;
++      __atomic_fetch_sub(&CC_room,e->size,__ATOMIC_RELAXED);
 +    }
 +  e->g     = g;
 +  e->ctg   = ctg;
 +  e->comp  = comp;
-+  e->size  = len + CONTIG_TAIL + 16;
 +  e->refs  = 1;
 +  e->ready = 0;
++  e->armed = 0;
 +  e->stamp = ++CC_clock;
-+  e->base  = NULL;
-+  CC_ent[CC_n++] = e;
-+  CC_bytes += e->size;
 +  pthread_mutex_unlock(&CC_lock);
 +
-+  e->base = (char *) malloc(e->size);
-+  if (e->base == NULL)
-+    { fprintf(stderr,"%s: Cannot allocate contig buffer\n",Prog_Name);
-+      Clean_Exit(1);
++  cc_free_list(&vict);
++  if (oldsize > 0 && oldsize != e->size)
++    { e->base = cc_resize_block(e->base,oldsize,e->size);
++      if (e->base == NULL)
++        { fprintf(stderr,"%s: Cannot resize contig buffer\n",Prog_Name);
++          Clean_Exit(1);
++        }
 +    }
-+  memset(e->base,4,e->size);
-+  e->seq = e->base + 1;
-+  if (Get_Contig(gdb,ctg,NUMERIC,e->seq) == NULL)
-+    Clean_Exit(1);
-+  if (comp)
-+    Complement_Seq(e->seq,len);
++  if (e->base == NULL)
++    { e->base = cc_new_block(e->size);
++      if (e->base == NULL)
++        { fprintf(stderr,"%s: Cannot allocate contig buffer\n",Prog_Name);
++          Clean_Exit(1);
++        }
++    }
++
++  //  The sequence area is overwritten by the chunks; the byte before it and the CONTIG_TAIL+15
++  //  bytes after it are the end-of-sequence code, as they are in a block that was filled
++  //  completely before decoding.
++
++  e->seq     = e->base + 1;
++  e->base[0] = 4;
++  memset(e->seq+len,4,CONTIG_TAIL+15);
++  e->len    = len;
++  e->chunk  = ((len / NTHREADS + 3) / 4) * 4;
++  if (e->chunk < CC_CHUNK_MIN)
++    e->chunk = CC_CHUNK_MIN;
++  if (e->chunk > CC_CHUNK_MAX)
++    e->chunk = CC_CHUNK_MAX;
++  e->nchunk = (int) ((len + e->chunk - 1) / e->chunk);
++  e->nextc  = 0;
++  e->donec  = 0;
 +
 +  pthread_mutex_lock(&CC_lock);
-+  e->ready = 1;
-+  pthread_cond_broadcast(&CC_ready);
++  if (e->nchunk == 0)
++    e->ready = 1;
++  e->armed = 1;
++  pthread_cond_broadcast(&e->done);
++  cc_help(e,gdb);
 +  pthread_mutex_unlock(&CC_lock);
 +  return (e);
 +}
 +
 +static void contig_release(CEntry *e)
 +{ pthread_mutex_lock(&CC_lock);
-+  e->refs -= 1;
++  if (--e->refs == 0)
++    CC_idle += e->size;
 +  pthread_mutex_unlock(&CC_lock);
 +}
 +
@@ -929,13 +1499,14 @@ diff --git a/FastGA.c b/FastGA.c
 +{ int i;
 +
 +  for (i = 0; i < CC_n; i++)
-+    { free(CC_ent[i]->base);
++    { cc_free_block(CC_ent[i]->base,CC_ent[i]->size);
++      pthread_cond_destroy(&(CC_ent[i]->done));
 +      free(CC_ent[i]);
 +    }
 +  free(CC_ent);
 +  CC_ent = NULL;
 +  CC_n = CC_cap = 0;
-+  CC_bytes = 0;
++  CC_bytes = CC_idle = 0;
 +}
 +
 +//  In-memory gather of the packed overlap records (header + trace) found while scanning seeds.
@@ -981,7 +1552,7 @@ diff --git a/FastGA.c b/FastGA.c
  { Overlap    *ovl   = &(pair->ovl);
    int         comp  = (ovl->flags != 0);
  #ifdef CALL_ALIGNER
-@@ -2979,8 +3517,6 @@
+@@ -2979,8 +4081,6 @@
    Align_Spec *spec  = pair->spec;
    Alignment  *align = &(pair->align);
    Path       *path  = align->path;
@@ -990,7 +1561,7 @@ diff --git a/FastGA.c b/FastGA.c
  #endif
  #if defined(DEBUG_SEARCH) || defined(DEBUG_HIT)
    int         repgo;
-@@ -2990,7 +3526,7 @@
+@@ -2990,7 +4090,7 @@
  
    int    alnMin;
    double alnRate;
@@ -999,7 +1570,7 @@ diff --git a/FastGA.c b/FastGA.c
    int64  alen, blen, mlen;
    int64  aoffset, doffset;
  
-@@ -3024,8 +3560,6 @@
+@@ -3024,8 +4124,6 @@
    nhit   = 0;
    nlas   = 0;
    nmem   = 0;
@@ -1008,7 +1579,7 @@ diff --git a/FastGA.c b/FastGA.c
  
    if (SELF && ctg1 == ctg2 && !comp)
      self = 1;
-@@ -3177,12 +3711,12 @@
+@@ -3177,12 +4275,12 @@
                        //  Fetch contig sequences if not already loaded
  #ifdef CALL_ALIGNER
                        if (ctg1 != ovl->aread)
@@ -1025,7 +1596,7 @@ diff --git a/FastGA.c b/FastGA.c
  #ifdef DEBUG_HIT
                            if (repgo)
                              printf("Loading A = %d%c\n",ctg1,comp?'c':'n');
-@@ -3190,8 +3724,10 @@
+@@ -3190,8 +4288,10 @@
  #endif
                          }
                        if (ctg2 != ovl->bread)
@@ -1038,7 +1609,7 @@ diff --git a/FastGA.c b/FastGA.c
                            align->blen = blen;
                            ovl->bread = ctg2;
  #ifdef DEBUG_HIT
-@@ -3264,18 +3800,8 @@
+@@ -3264,18 +4364,8 @@
                              rlen = path->aepos - path->abpos;
                              if (rlen >= alnMin && alnRate*rlen >= path->diffs)
                                { Compress_TraceTo8(ovl,0);
@@ -1059,7 +1630,7 @@ diff --git a/FastGA.c b/FastGA.c
                                  nlas += 1;
                                  nmem += path->tlen + OVL_SIZE;
                                }
-@@ -3402,33 +3928,74 @@
+@@ -3402,33 +4492,74 @@
          }
      }
  
@@ -1146,7 +1717,7 @@ diff --git a/FastGA.c b/FastGA.c
            }
        }
  
-@@ -3511,14 +4078,8 @@
+@@ -3511,14 +4642,8 @@
                if (op->bepos <= wp->bbpos || op->bbpos >= wp->bepos)  //  If b-intervals disjoint
                  continue;
  
@@ -1163,7 +1734,7 @@ diff --git a/FastGA.c b/FastGA.c
  
                dist = entwine(op,otrace,wp,wtrace,&where,0);
                if (where != -1)   // The paths meet at a trace point given by where
-@@ -3592,7 +4153,7 @@
+@@ -3592,7 +4717,7 @@
                // printf(" %3d x %3d: %d-%d vs %d-%d\n            %d-%d vs %d-%d\n",
                       // j,k,o->path.abpos,o->path.aepos,w->path.abpos,w->path.aepos,
                       // o->path.bbpos,o->path.bepos,w->path.bbpos,w->path.bepos);
@@ -1172,7 +1743,7 @@ diff --git a/FastGA.c b/FastGA.c
  
                if (op->abpos <= wp->abpos && op->aepos >= wp->aepos)
                  { w->flags |= ELIMINATED;
-@@ -3611,7 +4172,7 @@
+@@ -3611,7 +4736,7 @@
                tpath = o->path;
                align->path = &tpath;
                tpath.trace = tcopy = Malloc(sizeof(uint16)*tpath.tlen,"Trace");
@@ -1181,7 +1752,7 @@ diff --git a/FastGA.c b/FastGA.c
                { uint16 *t16 = (uint16 *) tcopy;
                  uint8  *t8  = (uint8  *) tcopy;
                  int     nn;
-@@ -3628,7 +4189,7 @@
+@@ -3628,7 +4753,7 @@
                tpath = w->path;
                align->path = &tpath;
                tpath.trace = tcopy = Malloc(sizeof(uint16)*tpath.tlen,"Trace");
@@ -1190,7 +1761,7 @@ diff --git a/FastGA.c b/FastGA.c
                { uint16 *t16 = (uint16 *) tcopy;
                  uint8  *t8  = (uint8  *) tcopy;
                  int     nn;
-@@ -3655,22 +4216,22 @@
+@@ -3655,22 +4780,22 @@
            hasmem = (o->flags & OWNS_MEMORY);
            o->flags &= RESET_FLAGS;
            if (fwrite( ((char *) o)+PTR_SIZE, EXO_SIZE, 1, ofile) != 1)
@@ -1220,7 +1791,7 @@ diff --git a/FastGA.c b/FastGA.c
                    Clean_Exit(1);
                  }
              }
-@@ -3679,13 +4240,18 @@
+@@ -3679,13 +4804,18 @@
            nmem += EXO_SIZE + o->path.tlen;
          }
  
@@ -1240,7 +1811,7 @@ diff --git a/FastGA.c b/FastGA.c
    pair->nhits += nhit;
    pair->nlass += nlas;
    pair->nlive += nliv;
-@@ -3693,14 +4259,18 @@
+@@ -3693,14 +4823,18 @@
    pair->nmemo += nmem;
  }
  
@@ -1263,7 +1834,7 @@ diff --git a/FastGA.c b/FastGA.c
      GDB       gdb1;
      GDB       gdb2;
      FILE     *ofile;
-@@ -3713,81 +4283,380 @@
+@@ -3713,81 +4847,426 @@
      int       tmaxl;
    } TP;
  
@@ -1289,12 +1860,11 @@ diff --git a/FastGA.c b/FastGA.c
 +//  genome 1 and one contig of genome 2 on one strand ("unit"), which align_contigs processes
 +//  independently of every other unit (it uses only its seed slice, the read-only contig tables
 +//  and thread-private buffers).  A producer thread loads and sorts the seed parts in order (up to
-+//  a memory budget ahead of the searchers); the NTHREADS searchers repeatedly take the task with
-+//  the most seeds among all sorted parts: first the tasks of BIG_TASK seeds or more, largest first
-+//  (they decide the length of the tail), then the remaining tasks of the oldest part in the order of
-+//  the sorted array, i.e. by contig pair, so that all threads work on neighbouring contig pairs and
-+//  share their decoded contigs.  Alignments are appended to the searcher's own file, and are put in
-+//  a canonical order by la_sort/la_merge afterwards.
++//  a memory budget ahead of the searchers); the NTHREADS searchers repeatedly take the next task
++//  of the oldest sorted part that has tasks left, in the block order of block_order, so that all
++//  threads work on neighbouring contig pairs and share their decoded contigs.  Alignments are
++//  appended to the searcher's own file, and are put in a canonical order by la_sort/la_merge
++//  afterwards.
 +//
 +//  A unit with many seeds is cut into slabs at points where the diagonal-bucket sequence jumps
 +//  by 2 or more.  At such a point scan_contigs restarts in exactly its initial state (the chain
@@ -1303,56 +1873,62 @@ diff --git a/FastGA.c b/FastGA.c
 +//  of the slabs are concatenated in seed order and the unchanged redundancy elimination of
 +//  finish_contigs runs once over the whole unit, by the thread that completes the last slab.
 +
-+//  Memory: the sorted seed array of a part is given back to the system from the front as the tasks
-+//  complete in array order (see release_front), and the next part is loaded as soon as the
-+//  unreleased seeds of the live parts plus the new part fit in a slack beyond the largest part.
-+//  The peak is therefore close to that of a strictly sequential load-sort-search cycle (one part),
-+//  while the tail of one part still overlaps the load and sort of the next.
-+
-+#ifndef BIG_TASK
-+#define BIG_TASK       262144   //  Tasks of at least this many seeds are started first
-+#endif
-+#define RELEASE_GRAN   (32ll<<20)
++//  Memory: the sorted seed array of a part is given back to the system from the front as its
++//  blocks complete (see release_front), and the next part is loaded as soon as the unreleased
++//  seeds of the live parts plus the new part fit in the size of the largest part.  The seeds
++//  therefore never take more than in a strictly sequential load-sort-search cycle, while the
++//  tail of one part still overlaps the load and sort of the next.  (A slack of 1/8 of the largest
++//  part beyond it, as before, raised the peak of maize B73 x Mo17 by 0.3 GB, when the many small
++//  parts of the minus strand were loaded together, and gained no search time; neither did
++//  starting the tasks of 2^18 seeds or more first, largest first, which made the threads
++//  decode ten large A contigs, 0.7 GB, at once at the start, when the largest part had just
++//  been sorted and the RSS peaks.)
  
 -  Contig_Bundle _pair, *pair = &_pair;
-+#define SEARCH_AHEAD_BYTES  (4ll<<30)   //  Upper bound on the slack beyond the largest part
-+#define SEARCH_AHEAD_MIN    (256ll<<20) //  Lower bound
-+
++#define RELEASE_GRAN   (32ll<<20)
+ 
+-  uint8 *x, *e, *b;
 +#ifndef SLAB_SPLIT
 +#define SLAB_SPLIT   32768    //  Units with more seeds than this are cut into slabs ...
 +#endif
 +#ifndef SLAB_MIN
 +#define SLAB_MIN      4096    //  ... of at least this many seeds
 +#endif
-+
+ 
+-  jcrnt = 0;
 +typedef struct
 +  { int     nslab;
 +    int     ndone;
 +    Gather *gat;          //  one gather per slab, in seed order
 +  } Group;
-+
+ 
+-  pair->tid  = parm->tid;
+-  pair->gdb1 = gdb1;
+-  pair->gdb2 = gdb2;
+-  pair->align.aseq = New_Contig_Buffer(gdb1);
+-  pair->align.bseq = New_Contig_Buffer(gdb2);
+-  if (pair->align.bseq == NULL || pair->align.bseq == NULL)
 +typedef struct
 +  { uint8 *beg, *end;     //  seeds [beg,end) in the sorted part
 +    int    ctg1, ctg2;    //  contig indices as expected by align_contigs
 +    int64  nseed;
-+    int64  prio;          //  seeds of the whole unit: tasks are taken largest unit first, and
-+                          //  the slabs of a unit consecutively (keeps the contig buffers warm)
 +    Group *grp;           //  NULL for an uncut unit
 +    int    slab;          //  index within grp
++    int    blk;           //  block of the part (see block_order)
 +  } Unit;
 +
 +typedef struct
 +  { int    q;             //  part number (strand*NPARTS + part)
 +    int    comp;
 +    uint8 *sarr;
-+    Unit  *unit;          //  tasks of BIG_TASK seeds or more by decreasing size, then the rest in array order
++    Unit  *unit;          //  tasks block by block (see block_order)
 +    int    nunit;
-+    int    ntier1;        //  number of tasks of the first kind
-+    int    t1done;        //  ... of which completed
 +    int    next;          //  next unit to hand out
 +    int    done;          //  units completed
-+    char  *fin;           //  fin[i] set when task i has completed
-+    int    front;         //  every task of the second kind before this index has completed
++    int    nblk;          //  blocks of tasks of the second kind
++    int   *bleft;         //  bleft[b]: tasks of block b not yet completed
++    uint8 **bbeg;         //  bbeg[b]: first seed of block b in the sorted array
++    int    bfront;        //  every block before this one has completed
 +    int64  released;      //  bytes at the front of the array already given back
 +    int64  bytes;         //  size of the sorted array still counted in Sched.live_bytes
 +  } Job;
@@ -1371,11 +1947,13 @@ diff --git a/FastGA.c b/FastGA.c
 +    int    nparts;
 +    int64 *pnels;              //  seeds in each part
 +    int64  limit;              //  the producer loads a part only while live_bytes + its size <= limit
++                               //    (the size of the largest part)
 +    RP    *rarm;               //  reimport parameters (one per thread)
 +    struct timespec t0;
 +  } Sched;
 +
 +static Sched *SCHED;
++
 +
 +#ifdef UNIT_STATS
 +
@@ -1413,40 +1991,87 @@ diff --git a/FastGA.c b/FastGA.c
 +
 +#endif
 +
-+static int unit_cmp(const void *l, const void *r)
++//  Order the tasks of a part block by block.  A block is a run of consecutive tasks in
++//  array order covering about BLOCK_BYTES of seeds (it starts at a unit, never inside the slabs of
++//  one), and the blocks are taken in array order.  Within a block the tasks are taken by B contig
++//  and, for one B contig, in array order (by A contig), the B contigs ascending in even blocks and
++//  descending in odd ones, so that the last B contig of a block is the first of the next.
++//
++//  In array order the B contig changes with almost every task while the A contig stays, so the
++//  threads would need every B contig an A contig hits at once, and again for every A contig: a
++//  part whose A contigs are small and whose B contigs are large (maize Mo17 against B73) then has
++//  to keep the whole B genome decoded, or decode about 9 TB.  By B contig, the threads work on
++//  one B contig together and the A contigs of the block, which a block's seeds keep few, are
++//  reused from one B contig to the next; a B contig is decoded once per block it is hit in.
++//  The blocks keep the seed array given back from the front almost as early as in array order.
++
++#ifndef BLOCK_BYTES
++#define BLOCK_BYTES  (256ll<<20)
++#endif
++
++static int block_cmp(const void *l, const void *r)
 +{ const Unit *a = (const Unit *) l;
 +  const Unit *b = (const Unit *) r;
 +
-+  int ta = (a->nseed >= BIG_TASK);
-+  int tb = (b->nseed >= BIG_TASK);
-+
-+  if (ta != tb)
-+    return (ta ? -1 : 1);
-+  if (ta && a->nseed != b->nseed)
-+    return (a->nseed > b->nseed ? -1 : 1);
++  if (a->blk != b->blk)
++    return (a->blk < b->blk ? -1 : 1);
++  if (a->ctg2 != b->ctg2)
++    { if (a->blk & 1)
++        return (a->ctg2 > b->ctg2 ? -1 : 1);
++      return (a->ctg2 < b->ctg2 ? -1 : 1);
++    }
 +  return (a->beg < b->beg ? -1 : (a->beg > b->beg ? 1 : 0));
 +}
 +
-+//  Give back the front of a part's seed array after a task completed (Sched lock held).  Once every
-+//  task of the first kind has completed, the tasks of the second kind are in array order, and
-+//  everything before the first task still to complete can no longer be read, except for the bytes of
-+//  its own first seed's page: the scan of the task before it reads the leading bytes of the seed
-+//  that follows its range.  Returns the number of bytes released.
++static void block_order(Job *job)
++{ uint8 *b0 = NULL;
++  int    i, nb;
++
++  nb = 0;
++  for (i = 0; i < job->nunit; i++)
++    { Unit *w = job->unit + i;
++
++      if (b0 == NULL || (w->beg - b0 >= BLOCK_BYTES && (w->grp == NULL || w->slab == 0)))
++        { b0  = w->beg;
++          nb += 1;
++        }
++      w->blk = nb-1;
++    }
++  job->nblk   = nb;
++  job->bfront = 0;
++  job->bleft  = (int *) Malloc(sizeof(int)*(nb+1),"Task blocks");
++  job->bbeg   = (uint8 **) Malloc(sizeof(uint8 *)*(nb+1),"Task blocks");
++  if (job->bleft == NULL || job->bbeg == NULL)
+     Clean_Exit(1);
+-  pair->align.path = &(pair->ovl.path);
+-  if (comp)
+-    { pair->ovl.flags   = COMP_FLAG;
+-      pair->align.flags = ACOMP_FLAG;
++  bzero(job->bleft,sizeof(int)*(nb+1));
++  for (i = 0; i < job->nunit; i++)
++    { Unit *w = job->unit + i;
++
++      if (job->bleft[w->blk]++ == 0)
++        job->bbeg[w->blk] = w->beg;
++    }
++  qsort(job->unit,job->nunit,sizeof(Unit),block_cmp);
++}
++
++//  Give back the front of a part's seed array after a task completed (Sched lock held).
++//  Everything before the first block still to complete can no longer be read, except for the
++//  bytes of its own first seed's page: the scan of the task before it reads the leading bytes of
++//  the seed that follows its range.  Returns the number of bytes released.
 +
 +static int64 release_front(Job *job, int idx)
 +{ uintptr_t hi;
 +  int64     lim;
 +
-+  job->fin[idx] = 1;
-+  if (idx < job->ntier1)
-+    job->t1done += 1;
-+  if (job->t1done < job->ntier1)
-+    return (0);
-+  while (job->front < job->nunit && job->fin[job->front])
-+    job->front += 1;
-+  if (job->front >= job->nunit)
++  job->bleft[job->unit[idx].blk] -= 1;
++  while (job->bfront < job->nblk && job->bleft[job->bfront] == 0)
++    job->bfront += 1;
++  if (job->bfront >= job->nblk)
 +    return (0);                       //  whole part done: it is freed as a whole
-+  hi  = ((uintptr_t) job->unit[job->front].beg) & ~((uintptr_t) 4095);
++  hi  = ((uintptr_t) job->bbeg[job->bfront]) & ~((uintptr_t) 4095);
 +  lim = (int64) (hi - (uintptr_t) job->sarr);
 +  if (lim - job->released < RELEASE_GRAN)
 +    return (0);
@@ -1460,12 +2085,10 @@ diff --git a/FastGA.c b/FastGA.c
 +//  Scan one task (unit or slab); the thread completing the last slab of a unit also eliminates the
 +//  redundant alignments of the whole unit.  Returns the cpu seconds spent in that last step
 +//  (only meaningful with UNIT_STATS).
- 
--  uint8 *x, *e, *b;
++
 +static double run_task(Unit *u, Contig_Bundle *pair, int swide, Sched *sch)
 +{ double fin = 0.;
- 
--  jcrnt = 0;
++
 +
 +  if (u->grp == NULL)
 +    { Gather g;
@@ -1479,8 +2102,10 @@ diff --git a/FastGA.c b/FastGA.c
 +#ifdef UNIT_STATS
 +      fin = cpu_now() - fin;
 +#endif
-+    }
-+  else
+     }
+   else
+-    { pair->ovl.flags   = 0;
+-      pair->align.flags = 0;
 +    { Group *grp = u->grp;
 +      int    last;
 +
@@ -1501,7 +2126,7 @@ diff --git a/FastGA.c b/FastGA.c
 +          free(grp->gat);
 +          free(grp);
 +        }
-+    }
+     }
 +  return (fin);
 +}
 +
@@ -1513,32 +2138,21 @@ diff --git a/FastGA.c b/FastGA.c
 +  GDB   *gdb2   = &(parm->gdb2);
 +  int    last_comp = -1;
 +  int64  freed;
++  int    held = 0;     //  this thread holds a token of the search budget
 +#ifdef UNIT_STATS
 +  double idle = 0.;
 +#endif
 +
 +  Contig_Bundle _pair, *pair = &_pair;
- 
-   pair->tid  = parm->tid;
-   pair->gdb1 = gdb1;
-   pair->gdb2 = gdb2;
--  pair->align.aseq = New_Contig_Buffer(gdb1);
--  pair->align.bseq = New_Contig_Buffer(gdb2);
--  if (pair->align.bseq == NULL || pair->align.bseq == NULL)
--    Clean_Exit(1);
++
++  pair->tid  = parm->tid;
++  pair->gdb1 = gdb1;
++  pair->gdb2 = gdb2;
 +  pair->align.aseq = NULL;    //  contigs come from the shared cache (contig_acquire)
 +  pair->align.bseq = NULL;
 +  pair->ea = NULL;
 +  pair->eb = NULL;
-   pair->align.path = &(pair->ovl.path);
--  if (comp)
--    { pair->ovl.flags   = COMP_FLAG;
--      pair->align.flags = ACOMP_FLAG;
--    }
--  else
--    { pair->ovl.flags   = 0;
--      pair->align.flags = 0;
--    }
++  pair->align.path = &(pair->ovl.path);
 +  pair->ovl.flags   = 0;
 +  pair->align.flags = 0;
    pair->ovl.aread = -1;
@@ -1576,31 +2190,28 @@ diff --git a/FastGA.c b/FastGA.c
 +      Unit *u   = NULL;
 +      int   j;
 +
++      if (held && gate_contended())       //  let a waiting part-loading thread compute
++        { pthread_mutex_unlock(&sch->lock);
++          gate_release();
++          held = 0;
++          pthread_mutex_lock(&sch->lock);
++        }
++
 +      for (j = 0; j < sch->njob; j++)
 +        { Job *c = sch->job[j];
 +
-+          if (c->next < c->nunit)
-+            { Unit *cu = c->unit + c->next;
-+
-+              if (job == NULL)
-+                { job = c;
-+                  u   = cu;
-+                }
-+              else if (cu->nseed >= BIG_TASK)
-+                { if (u->nseed < BIG_TASK || cu->nseed > u->nseed)
-+                    { job = c;
-+                      u   = cu;
-+                    }
-+                }
-+              else if (u->nseed < BIG_TASK && c->q < job->q)
-+                { job = c;
-+                  u   = cu;
-+                }
++          if (c->next < c->nunit && (job == NULL || c->q < job->q))
++            { job = c;
++              u   = c->unit + c->next;
 +            }
 +        }
 +
 +      if (job == NULL)
-+        { if (sch->finished)
++        { if (held)                        //  no token while waiting for work
++            { gate_release();
++              held = 0;
++            }
++          if (sch->finished)
 +            break;
 +#ifdef UNIT_STATS
 +          { double w0 = wall_now();
@@ -1615,6 +2226,11 @@ diff --git a/FastGA.c b/FastGA.c
 +
 +      job->next += 1;
 +      pthread_mutex_unlock(&sch->lock);
++
++      if (!held)
++        { gate_acquire(0);
++          held = 1;
++        }
 +
 +      if (job->comp != last_comp)
 +        { if (job->comp)
@@ -1668,7 +2284,8 @@ diff --git a/FastGA.c b/FastGA.c
 +          sch->pdone += 1;
 +          free(job->sarr);
 +          free(job->unit);
-+          free(job->fin);
++          free(job->bleft);
++          free(job->bbeg);
 +          free(job);
 +          pthread_cond_signal(&sch->room);
 +          if (VERBOSE)
@@ -1694,7 +2311,7 @@ diff --git a/FastGA.c b/FastGA.c
  
    parm->nhits += pair->nhits;
    parm->nlass += pair->nlass;
-@@ -3797,6 +4666,412 @@
+@@ -3797,6 +5276,418 @@
    return (NULL);
  }
  
@@ -1771,7 +2388,6 @@ diff --git a/FastGA.c b/FastGA.c
 +          w->ctg1  = ctg1;
 +          w->ctg2  = ctg2;
 +          w->nseed = (r-s0)/swide;
-+          w->prio  = (x-b)/swide;
 +          w->grp   = grp;
 +          w->slab  = ns++;
 +          s0 = r;
@@ -1861,7 +2477,6 @@ diff --git a/FastGA.c b/FastGA.c
 +                w->ctg1  = pc->ctg1;
 +                w->ctg2  = (int) jcrnt;
 +                w->nseed = (x-b)/swide;
-+                w->prio  = w->nseed;
 +                w->grp   = NULL;
 +                w->slab  = 0;
 +              }
@@ -1871,6 +2486,13 @@ diff --git a/FastGA.c b/FastGA.c
 +            b = x;
 +          }
 +    }
++  return (NULL);
++}
++
++static void *cut_gated(void *args)
++{ gate_acquire(1);
++  cut_thread(args);
++  gate_release();
 +  return (NULL);
 +}
 +
@@ -1921,11 +2543,13 @@ diff --git a/FastGA.c b/FastGA.c
 +  threads = (pthread_t *) Malloc(sizeof(pthread_t)*NTHREADS,"Cut threads");
 +  if (threads == NULL)
 +    Clean_Exit(1);
++  gate_release();                          //  the caller's token: each cut thread takes its own
 +  for (k = 1; k < NTHREADS; k++)
-+    Spawn(threads+k,cut_thread,&ca);
-+  cut_thread(&ca);
++    Spawn(threads+k,cut_gated,&ca);
++  cut_gated(&ca);
 +  for (k = 1; k < NTHREADS; k++)
 +    pthread_join(threads[k],NULL);
++  gate_acquire(1);
 +  free(threads);
 +  pthread_mutex_destroy(&ca.lock);
 +
@@ -1990,6 +2614,8 @@ diff --git a/FastGA.c b/FastGA.c
 +      sch->nlive += 1;
 +      sch->live_bytes += need;
 +      pthread_mutex_unlock(&sch->lock);
++      gate_acquire(1);                     //  for the serial steps of this part
++      contig_trim(need);
 +
 +      sarray = (uint8 *) Malloc(need,"Sort Array");
 +      job    = (Job *) Malloc(sizeof(Job),"Search job");
@@ -2019,11 +2645,13 @@ diff --git a/FastGA.c b/FastGA.c
 +          rarm[p].comp = u;
 +          rarm[p].inum = nu[p].inum;
 +        }
++      gate_release();                      //  each reimport thread takes its own token
 +      for (p = 1; p < NTHREADS; p++)
-+        Spawn(threads+p,reimport_thread,rarm+p);
-+      reimport_thread(rarm);
++        Spawn(threads+p,reimport_gated,rarm+p);
++      reimport_gated(rarm);
 +      for (p = 1; p < NTHREADS; p++)
 +        pthread_join(threads[p],NULL);
++      gate_acquire(1);
 +
 +      bzero(panel,sizeof(int64)*NCONTS);
 +      prev = 0;
@@ -2042,28 +2670,21 @@ diff --git a/FastGA.c b/FastGA.c
 +#ifdef UNIT_STATS
 +      t1 = wall_now();
 +#endif
++      gate_release();                      //  rmsd_sort takes a token per sort task
 +      if (rmsd_sort(sarray,nels,swide,swide,NCONTS,panel,NTHREADS))
 +        { fprintf(stderr,"%s: Out of memory sorting seeds of part %d\n",Prog_Name,q+1);
 +          Clean_Exit(1);
 +        }
++      gate_acquire(1);
 +#ifdef UNIT_STATS
 +      t2 = wall_now();
 +#endif
 +
-+      //  Cut the sorted part into (A contig, B contig) units, largest first
++      //  Cut the sorted part into (A contig, B contig) units, in block order
 +
 +      cut_part(job,sarray,panel,IDBsplit[i],IDBsplit[i+1],swide);
-+      qsort(job->unit,job->nunit,sizeof(Unit),unit_cmp);
-+      for (j = 0; j < job->nunit && job->unit[j].nseed >= BIG_TASK; j++)
-+        ;
-+      job->ntier1   = j;
-+      job->t1done   = 0;
-+      job->front    = j;
 +      job->released = 0;
-+      job->fin      = (char *) Malloc(job->nunit+1,"Task flags");
-+      if (job->fin == NULL)
-+        Clean_Exit(1);
-+      bzero(job->fin,job->nunit+1);
++      block_order(job);
 +
 +      job->q     = q;
 +      job->comp  = u;
@@ -2084,13 +2705,15 @@ diff --git a/FastGA.c b/FastGA.c
 +          sch->pdone += 1;
 +          free(sarray);
 +          free(job->unit);
-+          free(job->fin);
++          free(job->bleft);
++          free(job->bbeg);
 +          free(job);
 +        }
 +      else
 +        sch->job[sch->njob++] = job;
 +      pthread_cond_broadcast(&sch->work);
 +      pthread_mutex_unlock(&sch->lock);
++      gate_release();
 +    }
 +
 +  free(panel);
@@ -2107,7 +2730,7 @@ diff --git a/FastGA.c b/FastGA.c
  static int SORT_MAP(const void *x, const void *y)
  { Overlap *ol = *((Overlap **) x);
    Overlap *or = *((Overlap **) y);
-@@ -3834,6 +5109,16 @@
+@@ -3834,6 +5725,16 @@
      return (0);
  }
  
@@ -2124,7 +2747,7 @@ diff --git a/FastGA.c b/FastGA.c
  static void *la_sort(void *args)
  { TP *parm = (TP *) args;
  
-@@ -3842,18 +5127,19 @@
+@@ -3842,18 +5743,19 @@
    int64 size = parm->nmemo;
    
    void     *iblock, *off;
@@ -2148,7 +2771,7 @@ diff --git a/FastGA.c b/FastGA.c
    rewind(fid);
  
    if (fread(iblock,size,1,fid) != 1)
-@@ -3862,12 +5148,18 @@
+@@ -3862,12 +5764,18 @@
        Clean_Exit(1);
      }
    
@@ -2170,7 +2793,7 @@ diff --git a/FastGA.c b/FastGA.c
      }
  
    qsort(perm,novl,sizeof(Overlap *),SORT_MAP);
-@@ -3877,23 +5169,25 @@
+@@ -3877,23 +5785,25 @@
      { Overlap *o = perm[j];
  
        if (fwrite( ((void *) o)+PTR_SIZE, EXO_SIZE, 1, fid) != 1)
@@ -2202,7 +2825,7 @@ diff --git a/FastGA.c b/FastGA.c
  
    parm->tmaxl = tmaxl;
    return (NULL);
-@@ -3986,6 +5280,11 @@
+@@ -3986,6 +5896,11 @@
    in->ptr  = in->block;
    in->top  = in->block + remains;
    in->top += fread(in->top,1,bsize-remains,in->stream);
@@ -2214,7 +2837,7 @@ diff --git a/FastGA.c b/FastGA.c
  }
  
  static int la_merge(TP *parm)
-@@ -4035,7 +5334,9 @@
+@@ -4035,7 +5950,9 @@
    hsize = 0;
    for (i = 0; i < NTHREADS; i++)
      { if (in[i].ptr < in[i].top)
@@ -2225,7 +2848,7 @@ diff --git a/FastGA.c b/FastGA.c
            in[i].ptr  += EXO_SIZE;
            hsize      += 1;
            heap[hsize] = ovls + i;
-@@ -4046,7 +5347,7 @@
+@@ -4046,7 +5963,7 @@
      for (i = hsize/2; i > 1; i--)
        maheap(i,heap,hsize);
  
@@ -2234,7 +2857,7 @@ diff --git a/FastGA.c b/FastGA.c
  
    { char *db1_name;
      char *db2_name;
-@@ -4106,14 +5407,20 @@
+@@ -4106,14 +6023,20 @@
            hsize  -= 1;
            continue;
          }
@@ -2257,7 +2880,7 @@ diff --git a/FastGA.c b/FastGA.c
  
    for (i = 0; i < NTHREADS; i++)
      totl -= in[i].count;
-@@ -4133,18 +5440,15 @@
+@@ -4133,18 +6056,15 @@
  }
  
  static void pair_sort_search(GDB *gdb1, GDB *gdb2)
@@ -2279,7 +2902,7 @@ diff --git a/FastGA.c b/FastGA.c
    int       i, p, j, u;
  
    if (VERBOSE)
-@@ -4157,9 +5461,12 @@
+@@ -4157,9 +6077,12 @@
    unit[0] = N_Units;
    unit[1] = C_Units;
  
@@ -2294,7 +2917,7 @@ diff --git a/FastGA.c b/FastGA.c
      for (u = 0; u < 2; u++)
        { cum = 0;
          nu = unit[u];
-@@ -4170,8 +5477,7 @@
+@@ -4170,8 +6093,7 @@
                  nu[i].buck[j] = cum;
                }
              if (j+1 == NCONTS || Select[j] != Select[j+1])
@@ -2304,7 +2927,7 @@ diff --git a/FastGA.c b/FastGA.c
                  cum = 0;
                }
            }
-@@ -4186,11 +5492,7 @@
+@@ -4186,11 +6108,7 @@
            }
        }
  
@@ -2317,7 +2940,7 @@ diff --git a/FastGA.c b/FastGA.c
    }
  
  #ifdef LOAD_SEQS
-@@ -4199,17 +5501,12 @@
+@@ -4199,17 +6117,12 @@
  
    for (p = 0; p < NTHREADS; p++)
      { rarm[p].swide  = swide;
@@ -2335,7 +2958,7 @@ diff --git a/FastGA.c b/FastGA.c
  
        tarm[p].gdb1   = *gdb1;
        tarm[p].gdb2   = *gdb2;
-@@ -4253,99 +5550,87 @@
+@@ -4253,99 +6166,102 @@
        unlink(Catenate(SORT_PATH,"/",ALGN_PAIR,Numbered_Suffix(".",p,".las")));
      }
  
@@ -2365,8 +2988,38 @@ diff --git a/FastGA.c b/FastGA.c
 -      reimport_thread(rarm);
 -      for (p = 1; p < NTHREADS; p++)
 -        pthread_join(threads[p],NULL);
--#endif
--
++  pthread_mutex_init(&sched.lock,NULL);
++  pthread_cond_init(&sched.work,NULL);
++  pthread_cond_init(&sched.room,NULL);
++  sched.job = (Job **) Malloc(sizeof(Job *)*2*NPARTS,"Search jobs");
++  if (sched.job == NULL)
++    Clean_Exit(1);
++  sched.njob       = 0;
++  sched.nlive      = 0;
++  sched.live_bytes = 0;
++  sched.finished   = 0;
++  sched.pdone      = 0;
++  sched.swide      = swide;
++  { int64 big = 0;
++    int   q;
++
++    for (q = 0; q < 2*NPARTS; q++)
++      if ((sched.pnels[q]+1)*swide > big)
++        big = (sched.pnels[q]+1)*swide;
++    sched.limit = big;
++  }
++  sched.nparts     = 2*NPARTS;
++  sched.rarm       = rarm;
++  clock_gettime(CLOCK_MONOTONIC,&sched.t0);
++  SCHED = &sched;
++  cc_track_start();
++#ifdef UNIT_STATS
++  PS = (PStat *) Malloc(sizeof(PStat)*2*NPARTS,"Part stats");
++  bzero(PS,sizeof(PStat)*2*NPARTS);
++  if (NTHREADS > 1024)
++    { fprintf(stderr,"UNIT_STATS supports at most 1024 threads\n"); Clean_Exit(1); }
+ #endif
+ 
 -#ifdef DEBUG_SORT
 -      for (p = 0; p < NTHREADS; p++)
 -        printf("  %d",nu[p].file);
@@ -2391,55 +3044,27 @@ diff --git a/FastGA.c b/FastGA.c
 -            prev = next;
 -          }
 -        nels = next;
--
--#ifdef DEBUG_SORT
--        for (p = 0; p < NCONTS; p++)
--          if (panel[p] > 0)
--            printf(" %2d(%2d): %10lld %10lld\n",p,Perm1[p],panel[p],panel[p]/swide);
-+  pthread_mutex_init(&sched.lock,NULL);
-+  pthread_cond_init(&sched.work,NULL);
-+  pthread_cond_init(&sched.room,NULL);
-+  sched.job = (Job **) Malloc(sizeof(Job *)*2*NPARTS,"Search jobs");
-+  if (sched.job == NULL)
-+    Clean_Exit(1);
-+  sched.njob       = 0;
-+  sched.nlive      = 0;
-+  sched.live_bytes = 0;
-+  sched.finished   = 0;
-+  sched.pdone      = 0;
-+  sched.swide      = swide;
-+  { int64 big = 0, slack;
-+    int   q;
-+
-+    for (q = 0; q < 2*NPARTS; q++)
-+      if ((sched.pnels[q]+1)*swide > big)
-+        big = (sched.pnels[q]+1)*swide;
-+    slack = big/8;
-+    if (slack < SEARCH_AHEAD_MIN) slack = SEARCH_AHEAD_MIN;
-+    if (slack > SEARCH_AHEAD_BYTES) slack = SEARCH_AHEAD_BYTES;
-+    sched.limit = big + slack;
-+  }
-+  sched.nparts     = 2*NPARTS;
-+  sched.rarm       = rarm;
-+  clock_gettime(CLOCK_MONOTONIC,&sched.t0);
-+  SCHED = &sched;
-+#ifdef UNIT_STATS
-+  PS = (PStat *) Malloc(sizeof(PStat)*2*NPARTS,"Part stats");
-+  bzero(PS,sizeof(PStat)*2*NPARTS);
-+  if (NTHREADS > 1024)
-+    { fprintf(stderr,"UNIT_STATS supports at most 1024 threads\n"); Clean_Exit(1); }
- #endif
- 
--        if (VERBOSE)
--          { fprintf(stderr,"\r    Sorting seeds for part %d  ",u*NPARTS+i+1);
--            fflush(stderr);
--          }
 +  if (VERBOSE)
 +    { fprintf(stderr,"\r    Searching seeds: 0 of %d parts done",2*NPARTS);
 +      fflush(stderr);
 +    }
  
--        nused = rmsd_sort(sarray,nels,swide,swide/*-2*/,NCONTS,panel,NTHREADS,range);
+-#ifdef DEBUG_SORT
+-        for (p = 0; p < NCONTS; p++)
+-          if (panel[p] > 0)
+-            printf(" %2d(%2d): %10lld %10lld\n",p,Perm1[p],panel[p],panel[p]/swide);
+-#endif
++  SGATE.free   = NTHREADS;
++  SGATE.active = 0;
++  SGATE.peak   = 0;
++  SGATE_ON     = 1;
++  rmsd_gate_acquire = gate_acquire;
++  rmsd_gate_release = gate_release;
+ 
+-        if (VERBOSE)
+-          { fprintf(stderr,"\r    Sorting seeds for part %d  ",u*NPARTS+i+1);
+-            fflush(stderr);
+-          }
 +  Spawn(&producer,produce_parts,&sched);
 +  for (p = 1; p < NTHREADS; p++)
 +    Spawn(threads+p,search_seeds,tarm+p);
@@ -2447,6 +3072,16 @@ diff --git a/FastGA.c b/FastGA.c
 +  for (p = 1; p < NTHREADS; p++)
 +    pthread_join(threads[p],NULL);
 +  pthread_join(producer,NULL);
+ 
+-        nused = rmsd_sort(sarray,nels,swide,swide/*-2*/,NCONTS,panel,NTHREADS,range);
++  rmsd_gate_acquire = NULL;
++  rmsd_gate_release = NULL;
++  SGATE_ON = 0;
++  if (SGATE.active != 0 || SGATE.peak > NTHREADS)
++    { fprintf(stderr,"%s: Search compute budget violated (peak %d, held %d, budget %d)\n",
++                     Prog_Name,SGATE.peak,SGATE.active,NTHREADS);
++      Clean_Exit(1);
++    }
  
 -#ifdef DEBUG_SORT
 -        print_seeds(sarray,swide,range,panel,gdb1,gdb2,u);
@@ -2501,6 +3136,7 @@ diff --git a/FastGA.c b/FastGA.c
  #endif
 -    }
 +  contig_cache_free();
++  CC_track = 0;
 +  free(sched.job);
 +  free(sched.pnels);
  
@@ -2509,7 +3145,7 @@ diff --git a/FastGA.c b/FastGA.c
    for (p = 0; p < NTHREADS; p++)
      fclose(tarm[p].tfile);
    for (p = 1; p < NTHREADS; p++)
-@@ -4400,7 +5685,7 @@
+@@ -4400,7 +6316,7 @@
      la_sort(tarm+p);
  #else
    for (p = 1; p < NTHREADS; p++)
@@ -2518,7 +3154,7 @@ diff --git a/FastGA.c b/FastGA.c
    la_sort(tarm);
    for (p = 1; p < NTHREADS; p++)
      pthread_join(threads[p],NULL);
-@@ -4410,25 +5695,33 @@
+@@ -4410,25 +6326,33 @@
      Clean_Exit(1);
  }
  
@@ -2558,7 +3194,18 @@ diff --git a/FastGA.c b/FastGA.c
  }
  
  int main(int argc, char *argv[])
-@@ -4736,6 +6029,15 @@
+@@ -4636,6 +6560,10 @@
+       }
+   }
+ 
++#ifdef SXGC_SHARED_GIX
++  sxgc_set_threads(NTHREADS);
++#endif
++
+   //  Parse source names and make precursors if necessary
+ 
+   { char *p;
+@@ -4736,6 +6664,15 @@
            }
        }
  
@@ -2574,7 +3221,7 @@ diff --git a/FastGA.c b/FastGA.c
      if (TYPE1 <= IS_GDB || NMASK1 > 0)
        { char *command;
          int   nchar, k;
-@@ -4926,7 +6228,7 @@
+@@ -4926,7 +6863,7 @@
  
      if (Read_GDB(gdb1,Catenate(PATH1,"/",ROOT1,GEXTN1)) < 0)
        Clean_Exit(1);
@@ -2583,7 +3230,7 @@ diff --git a/FastGA.c b/FastGA.c
  
      if (SELF)
        gdb2 = gdb1;
-@@ -4940,10 +6242,14 @@
+@@ -4940,10 +6877,14 @@
  
          if (Read_GDB(gdb2,Catenate(PATH2,"/",ROOT2,GEXTN2)) < 0)
            Clean_Exit(1);
@@ -2599,7 +3246,7 @@ diff --git a/FastGA.c b/FastGA.c
    if (OUT_TYPE != 2)
      { ONE_ROOT = Strdup(Numbered_Suffix("_oaln.",getpid(),""),"Allocating temp name");
        ONE_PATH = SORT_PATH;
-@@ -5125,7 +6431,7 @@
+@@ -5125,7 +7066,7 @@
            unlink(name);
            name = Catenate(SORT_PATH,"/",PAIR_NAME,Numbered_Suffix(".",k,".C"));
            C_Units[k].file = open(name,O_RDWR|O_CREAT|O_TRUNC,S_IRWXU);
@@ -2608,7 +3255,7 @@ diff --git a/FastGA.c b/FastGA.c
              { fprintf(stderr,"%s: Cannot open %s for reading & writing\n",Prog_Name,name);
                Clean_Exit(1);
              }
-@@ -5152,6 +6458,30 @@
+@@ -5152,6 +7093,30 @@
      else
        adaptamer_merge(T1,T2,P1,P2,gdb1->seqtot);
  
@@ -3470,7 +4117,7 @@ diff --git a/RSDsort.c b/RSDsort.c
    digit += 1;
    if (digit <= KSIZE)
      for (y = 0; y < ntop; y++)
-@@ -251,62 +269,126 @@
+@@ -251,62 +269,136 @@
        }
  }
  
@@ -3508,26 +4155,34 @@ diff --git a/RSDsort.c b/RSDsort.c
  
 -  int      x;
 -  int64    alive[256];
++//  Optional compute budget of the caller: a thread holds a token while it sorts a task and
++//  none while it waits for one (both NULL: no budget).
+ 
+-  if (KSIZE <= 1)
+-    return (NULL);
++void (*rmsd_gate_acquire)(int hi) = NULL;
++void (*rmsd_gate_release)(void)   = NULL;
+ 
+-  for (x = 0; x < 256; x++)
+-    alive[x] = 0;
 +static void *sort_thread(void *arg)
 +{ int64  alive[256], len[256];
 +  int    nzero[256];
 +  Task   kid[256];
 +  int    x;
  
--  if (KSIZE <= 1)
--    return (NULL);
-+  (void) arg;
- 
-   for (x = 0; x < 256; x++)
-     alive[x] = 0;
- 
 -  for (x = beg; x < end; x++)
 -    { if (PARTS[x] == 0)
 -        continue;
--
++  (void) arg;
+ 
 -#ifdef SHOW_STUFF
 -      printf("Bucket %3d: %12lld - %12lld\n",x,off,off+PARTS[x]);
 -#endif
++  for (x = 0; x < 256; x++)
++    alive[x] = 0;
+ 
+-      radix_sort(ARRAY + off, PARTS[x], 0, alive);
 +  while (1)
 +    { Task t;
 +      int  nk;
@@ -3542,7 +4197,9 @@ diff --git a/RSDsort.c b/RSDsort.c
 +      t = Q_task[--Q_n];
 +      pthread_mutex_unlock(&Q_lock);
  
--      radix_sort(ARRAY + off, PARTS[x], 0, alive);
+-      off += PARTS[x];
++      if (rmsd_gate_acquire != NULL)
++        rmsd_gate_acquire(1);
 +      nk = 0;
 +      if (t.size > Q_big)
 +        { int ntop, digit = t.digit;
@@ -3570,8 +4227,9 @@ diff --git a/RSDsort.c b/RSDsort.c
 +        }
 +      else
 +        radix_sort(t.array,t.size,t.digit,alive);
- 
--      off += PARTS[x];
++      if (rmsd_gate_release != NULL)
++        rmsd_gate_release();
++
 +      pthread_mutex_lock(&Q_lock);
 +      if (Q_n + nk > Q_max)
 +        { Task *nt;
@@ -3632,7 +4290,7 @@ diff --git a/RSDsort.c b/RSDsort.c
    RSIZE = rsize;
    PSIZE = rsize+1;
    KSIZE = ksize;
-@@ -317,61 +399,68 @@
+@@ -317,61 +409,68 @@
    S_gap1 = GAP1*RSIZE;
    S_gap2 = GAP2*RSIZE;
  

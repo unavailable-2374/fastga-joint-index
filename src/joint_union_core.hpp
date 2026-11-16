@@ -111,7 +111,15 @@ struct Task {
     uint32_t plen;        // longest shared prefix, 12..40
     uint32_t first,last;  // view-two rows are list[first,last) of the panel's view-two row list
 };
+// One self-merge query group (a run of rows with equal keys, or one row) and the rows its matches are drawn from.
+struct SelfTask {
+    uint32_t g0,g1;   // query group: rows [g0,g1)
+    uint32_t r0,r1;   // rows [r0,r1) hold every occurrence it is matched against (the group included)
+    uint32_t plen;    // seed length: 40 for a repeated key, else the longest neighbour LCP (12..39)
+};
 struct PanelScratch {
+    std::vector<SelfTask> stasks;
+    std::vector<uint32_t> gstart; std::vector<uint64_t> gcount;
     std::vector<uint32_t> pos2,w2;   // view-two row list: panel index and occurrence count (first n2 used)
     std::vector<uint8_t> l2;         // l2[t]: LCP between list items t-1 and t (l2[0] unused)
     std::vector<uint32_t> idx;       // rows with a view-one occurrence
@@ -172,6 +180,41 @@ inline void plan_panel(const uint8_t*code,const uint32_t*m1,const uint32_t*m2,si
         out[nt]={e,plen,uint32_t(a),uint32_t(b)};nt+=!skip;
     }
     s.tasks.resize(nt);
+}
+// Self merge of one panel, as FastGA's self merge over a single table: m[i] is the number of occurrences of row i.
+// A group is a maximal run of rows whose consecutive codes are 40 (equal keys); code[first row] is its LCP with the
+// previous group. A group with several occurrences matches only itself at the full key length. A single occurrence
+// matches, at the longer of its two neighbour LCPs (at least 12), the neighbour groups reachable through consecutive
+// LCPs of at least that length. Either way the range is dropped when it holds freq or more occurrences (the query
+// included); the pairs themselves (every occurrence of the group against every other occurrence of the range, masks
+// aside) are formed by the caller.
+inline void plan_panel_self(const uint8_t*code,const uint32_t*m,size_t n,uint64_t freq,PanelScratch&s){
+    s.stasks.clear();s.gstart.clear();s.gcount.clear();
+    if(!n)return;
+    for(size_t e=0;e<n;++e){
+        if(e==0||code[e]!=40){s.gstart.push_back(uint32_t(e));s.gcount.push_back(0);}
+        s.gcount.back()+=m[e];
+    }
+    const size_t G=s.gstart.size();
+    s.gstart.push_back(uint32_t(n));
+    for(size_t g=0;g<G;++g){
+        const uint64_t qn=s.gcount[g];
+        if(!qn)continue;
+        const uint32_t g0=s.gstart[g],g1=s.gstart[g+1];
+        if(qn>1){
+            if(qn>=freq)continue;
+            s.stasks.push_back({g0,g1,g0,g1,40u});
+            continue;
+        }
+        const unsigned left=g0>0?code[g0]:0u,right=g1<n?code[g1]:0u;
+        const unsigned length=std::max(left,right);
+        if(length<12)continue;
+        size_t low=g,high=g+1;uint64_t count=qn;
+        while(low>0&&code[s.gstart[low]]>=length){--low;count+=s.gcount[low];if(count>=freq)break;}
+        while(high<G&&code[s.gstart[high]]>=length){count+=s.gcount[high];++high;if(count>=freq)break;}
+        if(count>=freq)continue;
+        s.stasks.push_back({g0,g1,s.gstart[low],s.gstart[high],length});
+    }
 }
 }
 #endif

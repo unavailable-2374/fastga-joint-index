@@ -4,13 +4,24 @@ constexpr char ORDER_MAGIC[8]={'S','X','G','O','R','D','R','5'};
 bool joint_view(const fs::path&p){File f(p);if(f.size<8)return false;auto h=read_at(f.fd,0,8);return !memcmp(h.data(),VIEW_MAGIC,8);}
 struct View {
     Bytes h;Metadata m;fs::path root;unsigned selection;std::vector<int>amap,bmap;uint64_t count;
+    // The bundle directory a view points to: the header and the small mapping block at the end of the file, without
+    // the 16 MB row index. Lets the front end start loading the bundle while the view is still being parsed.
+    static fs::path read_root(const fs::path&p){
+        File file(p);if(file.size<HEADER)fail("truncated joint view");auto h=read_at(file.fd,0,HEADER);
+        if(memcmp(h.data(),VIEW_MAGIC,8)||u32(h.data()+8)!=4||u32(h.data()+124)!=crc32(0,h.data(),124))fail("joint view header checksum/version mismatch");
+        auto len=u64(h.data()+56),extra=u64(h.data()+80);
+        if(!len||len>file.size-HEADER||extra!=HEADER+len||extra>file.size||file.size-extra>160000000)fail("invalid joint view bounds");
+        auto e=read_at(file.fd,extra,file.size-extra);if(crc(e)!=u32(h.data()+88))fail("joint view mapping checksum mismatch");size_t at=0;auto size=take(e,at);if(size>e.size()-at)fail("truncated joint view path");
+        std::string rel((char*)e.data()+at,size);if(rel.empty()||rel.find('\0')!=std::string::npos)fail("invalid joint view path");
+        return fs::weakly_canonical(p.parent_path()/rel);
+    }
     explicit View(const fs::path&p){
         File file(p);if(file.size<HEADER)fail("truncated joint view");h=read_at(file.fd,0,HEADER);
         if(memcmp(h.data(),VIEW_MAGIC,8)||u32(h.data()+8)!=4||u32(h.data()+124)!=crc32(0,h.data(),124))fail("joint view header checksum/version mismatch");
         selection=u32(h.data()+20);count=u64(h.data()+24);auto len=u64(h.data()+56),rawlen=u64(h.data()+64),extra=u64(h.data()+80);
         if(selection<1||selection>3||count>INT64_MAX||u64(h.data()+48)!=HEADER||!len||rawlen<16||rawlen>140000000||len>file.size-HEADER||extra!=HEADER+len||extra>file.size||file.size-extra>160000000)fail("invalid joint view bounds");
-        auto packed=read_at(file.fd,HEADER,len);Bytes raw(rawlen);uLongf n=rawlen;
-        if(uncompress(raw.data(),&n,packed.data(),packed.size())!=Z_OK||n!=rawlen||crc(raw)!=u32(h.data()+72))fail("joint view metadata checksum mismatch");
+        auto packed=read_at(file.fd,HEADER,len);Bytes raw(rawlen);
+        if(!sxgc_positions::inflate_exact(raw.data(),raw.size(),packed.data(),packed.size())||crc(raw)!=u32(h.data()+72))fail("joint view metadata checksum mismatch");
         m=metadata(raw,u32(h.data()+16));if(m.kmer!=40||m.index.back()!=int64_t(count))fail("joint view row metadata mismatch");
         auto e=read_at(file.fd,extra,file.size-extra);if(crc(e)!=u32(h.data()+88))fail("joint view mapping checksum mismatch");size_t at=0;auto size=take(e,at);if(size>e.size()-at)fail("truncated joint view path");
         std::string rel((char*)e.data()+at,size);at+=size;if(rel.empty()||rel.find('\0')!=std::string::npos)fail("invalid joint view path");root=fs::weakly_canonical(p.parent_path()/rel);
@@ -128,7 +139,16 @@ inline std::shared_ptr<JointBundle> shared_bundle(const fs::path&root,bool pin=f
 // Front end hint: the view at p will be opened as a stream. Parses it now (pinned) and builds its bundle in the
 // background while the caller goes on to the next genome. Errors surface when the stream is opened.
 inline std::shared_ptr<const View> warm_view(const fs::path&p){
-    auto v=shared_view(p,true);auto&sj=shared_joint();fs::path root=v->root;
+    auto&sj=shared_joint();
+    // The bundle starts loading before the view's row index is parsed: the two overlap (one thread parses the view while
+    // the bundle's setup pool, one thread narrower than -T, builds). A view whose root cannot be read cheaply is parsed first.
+    fs::path early;try{early=View::read_root(p);}catch(...){}
+    if(!early.empty()){
+        std::lock_guard<std::mutex>g(sj.warm_lock);
+        if(sj.warmed.insert(early.string()).second)
+            sj.warming.push_back(std::async(std::launch::async,[early]{try{shared_bundle(early,true);}catch(...){}}));
+    }
+    auto v=shared_view(p,true);fs::path root=v->root;
     std::lock_guard<std::mutex>g(sj.warm_lock);
     if(!sj.warmed.insert(root.string()).second)return v; // the bundle of this root is already warming (or built)
     sj.warming.push_back(std::async(std::launch::async,[root]{try{shared_bundle(root,true);}catch(...){}}));
