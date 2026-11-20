@@ -35,6 +35,8 @@ optional complete seed audit. The corrected native baseline also contains:
   upstream FastGA with this fix alone.
 * `MSDsort` waits on its condition variables in a `while` loop instead of an `if`, so a spurious or stolen wake-up
   can no longer let a sorter thread run ahead.
+* `ALNtoPSL` trims trailing INDELs only while the trace is non-empty: an alignment without INDELs has an empty trace,
+  and upstream then reads `trace[-1]` (an out-of-bounds read under ASan, a crash under TSan).
 * checked output writes: `ALNtoPAF`/`ALNtoPSL` verify their part files and standard output (flush, `ferror`, `fclose`),
   the ONE library verifies flush and close of every file it writes, `FAtoGDB` verifies the `.bps` sequence file,
   and `FastGA`/`GIXmake` write seed and index files with a retrying full-write helper. Each failure prints the program,

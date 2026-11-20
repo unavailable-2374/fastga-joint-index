@@ -23,6 +23,7 @@ extern "C" {
 #include <limits>
 #include <map>
 #include <set>
+#include <sstream>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -58,17 +59,27 @@ bool joint_templates = false;
 // Joint v4 outputs written by the stream producers themselves (no joint-pack pass).
 struct JointFuse {
     std::string copies,reference_meta,target_meta;
-    bool enabled() const {return !copies.empty()||!reference_meta.empty()||!target_meta.empty();}
+    std::string copy_dir;std::vector<std::string> metas; // N samples: joint.<i>.<j>.copies directory and one meta per sample
+    bool n_samples() const {return !copy_dir.empty()||!metas.empty();}
+    bool enabled() const {return !copies.empty()||!reference_meta.empty()||!target_meta.empty()||n_samples();}
     // Consumes a producer command-line option; false when it is not a joint option.
     bool option(const std::string &name,const std::string &value) {
         if(name=="--joint-copies")copies=value;
         else if(name=="--joint-reference-meta")reference_meta=value;
         else if(name=="--joint-target-meta")target_meta=value;
+        else if(name=="--joint-copy-dir")copy_dir=value;
+        else if(name=="--joint-metas"){metas.clear();std::stringstream ss(value);std::string m;while(std::getline(ss,m,','))metas.push_back(m);}
         else return false;
         return true;
     }
     void validate(size_t samples) const {
         if(!enabled())return;
+        if(n_samples()){
+            if(!copies.empty()||!reference_meta.empty()||!target_meta.empty())throw std::runtime_error("--joint-copy-dir/--joint-metas (N samples) exclude the two-sample --joint-* options");
+            if(copy_dir.empty()||metas.size()!=samples)throw std::runtime_error("N-sample joint output needs --joint-copy-dir and one --joint-metas entry per sample");
+            if(!joint_templates||samples<3||samples>64)throw std::runtime_error("N-sample joint output needs --storage joint-template and 3..64 samples");
+            return;
+        }
         if(copies.empty()||reference_meta.empty()||target_meta.empty())throw std::runtime_error("joint output needs --joint-copies, --joint-reference-meta and --joint-target-meta together");
         if(!joint_templates||samples!=2)throw std::runtime_error("joint output needs --storage joint-template and exactly two samples");
     }
@@ -167,6 +178,9 @@ struct Archive {
 // --threads N counts the computing main thread, so the pool has N-1 workers.
 unsigned encode_threads=1;
 inline bool gate_active(){return sxgc_gate_active();}
+// Set on a thread that dispatches long jobs (the range consumer's main thread): while it waits it helps only with the
+// short block-encode jobs, since a long job it took would stop the dispatching and leave the workers without work.
+inline thread_local bool help_short_only=false;
 struct Encoded {Bytes raw,packed;uint32_t checksum;unsigned codec;size_t legacy_bytes;};
 class EncodePool {
     std::mutex m;std::condition_variable ready;std::deque<std::function<void()>> jobs,hot; // hot: short block-encode jobs, taken before the long jobs
@@ -179,9 +193,9 @@ public:
             {GateHold token;job();}}});
     }
     ~EncodePool(){{std::lock_guard<std::mutex> lock(m);stop=true;}ready.notify_all();for(auto &t:workers)t.join();}
-    // Caller holds the lock: pops a hot job first, else the oldest long job.
-    bool take(std::function<void()> &job){
-        auto &q=hot.empty()?jobs:hot;if(q.empty())return false;job=std::move(q.front());q.pop_front();return true;}
+    // Caller holds the lock: pops a hot job first, else (unless short_only) the oldest long job.
+    bool take(std::function<void()> &job,bool short_only=false){
+        auto &q=hot.empty()&&!short_only?jobs:hot;if(q.empty())return false;job=std::move(q.front());q.pop_front();return true;}
     void post(std::function<void()> job,bool urgent=false){
         {std::lock_guard<std::mutex> lock(m);(urgent?hot:jobs).emplace_back(std::move(job));}
         ready.notify_one();
@@ -189,7 +203,7 @@ public:
     // Lets a thread that would otherwise wait run one queued job (jobs never wait on jobs).
     bool run_one(){
         std::function<void()> job;
-        {std::lock_guard<std::mutex> lock(m);if(!take(job))return false;}
+        {std::lock_guard<std::mutex> lock(m);if(!take(job,help_short_only))return false;}
         {GateHold token(true);job();}return true;
     }
     std::future<Encoded> submit(std::function<Encoded()> f){
@@ -202,7 +216,8 @@ unsigned side_threads=0;
 // Pool workers: --threads counts the main thread and the side threads. When none is left, jobs run inline.
 // Under the shared budget every thread that waits holds no token, so the pool may have as many workers as the budget has tokens.
 unsigned pool_size(){return gate_active()?(encode_threads>1?encode_threads:0):encode_threads>1+side_threads?encode_threads-1-side_threads:0;}
-EncodePool &encode_pool(){static EncodePool pool(pool_size());return pool;}
+bool pool_started=false; // pool_size() is fixed once the pool exists
+EncodePool &encode_pool(){static EncodePool pool((pool_started=true,pool_size()));return pool;}
 // Waits for a pool result on the main thread, running queued jobs meanwhile so the thread is not idle.
 template<class T> T get_helping(std::future<T> &f){
     if(pool_size())while(f.wait_for(std::chrono::seconds(0))!=std::future_status::ready)
@@ -309,9 +324,12 @@ Metadata metadata(const Bytes &b,uint32_t csize){
         if(v<0||v>=m.ncontig||seen[v])fail("invalid GIX contig permutation");seen[v]=true;m.perm[i]=v;}
     return m;
 }
-Bytes unpack_meta(const Archive &a){
+// GIX metadata is a fixed 2^24-entry prefix index plus the contig permutation; other metadata (the joint
+// order directory) passes its own bound derived from already validated header fields.
+constexpr uint64_t GIX_META_MAX=140000000;
+Bytes unpack_meta(const Archive &a,uint64_t max_raw=GIX_META_MAX){
     uint64_t off=u64(a.h.data()+48),len=u64(a.h.data()+56),rawlen=u64(a.h.data()+64);
-    if(off<HEADER||off>a.f->size||len>a.f->size-off||rawlen<16||rawlen>140000000||!len)
+    if(off<HEADER||off>a.f->size||len>a.f->size-off||rawlen<16||rawlen>max_raw||!len)
         fail("invalid shared metadata bounds");
     Bytes packed=read_at(a.f->fd,off,len),raw(rawlen);
     if(!sxgc_positions::inflate_exact(raw.data(),raw.size(),packed.data(),packed.size())||crc(raw)!=u32(a.h.data()+72))
@@ -606,6 +624,7 @@ void build_streams_serial(const fs::path &out,const std::vector<std::string>&arg
     if(args.empty()||args.size()%2||!fs::is_directory(out))fail("build-stream needs an existing private staging directory and SAMPLE FIFO pairs");
     if(fs::exists(out/"sequences.sgd")||fs::exists(out/"READY"))fail("direct output already exists");
     joint_fuse.validate(args.size()/2);
+    if(joint_fuse.n_samples())fail("N-sample joint output needs the range consumer (--ranges 1 or more)");
     const bool fused=joint_fuse.enabled();
     if(fused)for(const char*name:{"reference.sgr","residual.sgr","joint.order","joint.copies","joint.names"})
         if(fs::exists(out/name))fail(std::string("direct joint output already exists: ")+name);
@@ -648,6 +667,9 @@ void build_streams(const fs::path &out,const std::vector<std::string>&args){
     // libdeflate selects its CRC-32/Adler-32 kernels lazily on the first call by writing a global
     // function pointer; make that first call here, before any encoder thread exists.
     {const unsigned char zero=0;volatile uint32_t warm=libdeflate_crc32(0,&zero,1)+libdeflate_adler32(1,&zero,1);(void)warm;}
+    // The range consumer's stream readers mostly wait on their inputs: under a gate (the builder's, else a private one
+    // of --threads tokens) the pool keeps a worker per token and only threads that compute hold one.
+    if(stream_ranges&&encode_threads>1&&!pool_started)sxgc_gate_private(encode_threads);
     if(stream_ranges)build_streams_ranged(out,args,stream_ranges);else build_streams_serial(out,args);
 }
 void verify(const fs::path &source,const fs::path &shared){
@@ -839,6 +861,11 @@ int main(int argc,char **argv){try{sjio::guard_stdout("gixshare");
     if(argc==8&&!strcmp(argv[1],"compare-seeds")){sg::joint_compare_seeds(argv[2],argv[3],argv[4],argv[5],argv[6],argv[7]);return 0;}
     if((argc==8||(argc==10&&!strcmp(argv[8],"--threads")))&&!strcmp(argv[1],"joint-pack")){
         if(argc==10)sg::threads(argv[9]);sg::joint_pack(argv[2],argv[3],argv[4],argv[5],argv[6],argv[7]);return 0;}
+    if(argc>=4&&!strcmp(argv[1],"joint-pack-n")){ // ROOT N NAME... META... COPYDIR [--threads T]
+        int last=argc;if(argc>=2&&!strcmp(argv[argc-2],"--threads")){sg::threads(argv[argc-1]);last=argc-2;}
+        unsigned n=std::stoul(argv[3]);if(n<3||n>64||last!=int(5+2*n))sg::fail("usage: gixshare joint-pack-n ROOT N NAME_0..NAME_N-1 META_0..META_N-1 COPYDIR [--threads T]");
+        std::vector<std::string>names;std::vector<sg::fs::path>metas;for(unsigned i=0;i<n;++i){names.emplace_back(argv[4+i]);metas.emplace_back(argv[4+n+i]);}
+        sg::joint_pack_n(argv[2],names,metas,argv[4+2*n]);return 0;}
     if(argc==10&&!strcmp(argv[1],"view")){
         std::string root,samples,gdb,out;for(int i=2;i<argc;i+=2){std::string flag=argv[i];if(flag=="--index")root=argv[i+1];else if(flag=="--samples")samples=argv[i+1];else if(flag=="--gdb")gdb=argv[i+1];else if(flag=="--output")out=argv[i+1];else sg::fail("unknown view option: "+flag);}
         if(root.empty()||samples.empty()||gdb.empty()||out.empty())sg::fail("view requires --index --samples --gdb --output");sg::joint_bind_view(sg::fs::absolute(root),samples,sg::fs::absolute(gdb),sg::fs::absolute(out));return 0;}

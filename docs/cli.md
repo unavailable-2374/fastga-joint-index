@@ -60,7 +60,10 @@ through `SXGC_BUDGET_GATE`). Whichever side has work therefore uses the cores th
 idle, and the threads that compute at any moment never exceed `-T`: the gate records the peak
 number of token holders (`peak_active`) and the build fails if it exceeded `T`.
 `build.json` records the plan as `"schedule": "shared-pool"` with the pool size, the program widths
-and the measured peak. `FASTGA_SHARED_NATIVE_SPLIT=REFERENCE,TARGET,ENCODER` sets those program
+and the measured peak. With three or more samples (N-sample joint bundle) every producer is
+`max(1, T/N)` threads wide in the same pool (4 each for six samples at `-T24`), and the copy chain
+before it runs one step after another: `joint-copy --pseudo` and `--split` single-threaded, the
+collection copy with at most 8 threads and the finder with `T`. `FASTGA_SHARED_NATIVE_SPLIT=REFERENCE,TARGET,ENCODER` sets those program
 widths (each at most `-T`). When no thread is left for a producer (`-T1`, `-T2`), raw seed
 streams are spooled sequentially and every step uses the whole budget. PFP
 streams the suffix array from `pfbwt -t A` (A workers, its producing main thread
@@ -128,11 +131,18 @@ GIXmake-shared -T24 --storage joint --reference A \
   --input A=A.fa --input B=B.fa --output indexes/joint
 GIXmake-shared -T24 --backend pfp --storage joint --reference A \
   --input A=A.fa --input B=B.fa --output indexes/pfp-joint
+GIXmake-shared -T24 --input A=A.fa --input B=B.fa --input C=C.fa --input D=D.fa \
+  --output indexes/joint4
 ```
 
 Create the parent output directory first. `--storage auto` is the default: two
-inputs choose joint v4 with the first input as reference; other collections use
-source v3. Explicit `legacy`, `positions`, `source` and `joint` modes are supported
+inputs choose joint v4 with the first input as reference; three to 64 inputs choose
+the N-sample joint bundle (native backend; storage order is input order with the
+reference moved first, and each sample copies from all earlier ones), or source v3
+with `--backend pfp`; one input uses source v3. `--copy-index-mib M` (N-sample
+joint only, default 0 = one part) bounds the copy finder's minimizer table to parts of
+at most M MiB, lowering its peak memory at the cost of one reference scan per extra
+part; the index does not depend on it. Explicit `legacy`, `positions`, `source` and `joint` modes are supported
 with either sorting backend. `--reference` selects the joint reference, `--mask`
 and `--implicit-mask` control annotations, and `--scratch`/`--log-dir` select
 temporary space and a new persistent log directory. Inputs have safe,

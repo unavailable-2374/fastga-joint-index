@@ -24,6 +24,40 @@ Bytes joint_order_raw(const unsigned char*origin,const uint64_t*weight,const uns
     packed.insert(packed.end(),lcp_plane.begin(),lcp_plane.end());
     return packed;
 }
+// ---- N samples (order codec 3) ----
+// Raw codec-3 order block: origin bitplanes, one nonzero-weight plane per sample 1..N-1, per-sample exception lists,
+// LCP plane. weight[s-1][i] is the weight of sample s on row i.
+Bytes joint_order_raw_n(const unsigned char*origin,const std::vector<std::vector<uint64_t>>&weight,const unsigned char*lcp,unsigned n,unsigned samples){
+    unsigned ob=0;while((1u<<ob)<samples)++ob;size_t plane=(n+7)/8;Bytes packed(plane*(ob+samples-1));
+    for(unsigned i=0;i<n;++i){for(unsigned b=0;b<ob;++b)if((origin[i]>>b)&1)packed[b*plane+i/8]|=1u<<(i%8);
+        for(unsigned s=1;s<samples;++s)if(weight[s-1][i])packed[(ob+s-1)*plane+i/8]|=1u<<(i%8);}
+    for(unsigned s=1;s<samples;++s){Bytes exceptions;uint64_t last=0,count=0;
+        for(unsigned i=0;i<n;++i)if(weight[s-1][i]>1){varint(exceptions,i-last);varint(exceptions,weight[s-1][i]);last=i;++count;}
+        varint(packed,count);packed.insert(packed.end(),exceptions.begin(),exceptions.end());}
+    auto lcp_plane=sgu::lcp_encode(lcp,n);packed.insert(packed.end(),lcp_plane.begin(),lcp_plane.end());
+    return packed;
+}
+void joint_write_view_n(const fs::path&path,const fs::path&root,unsigned selected,const Metadata&m,const std::vector<std::vector<int>>&maps){
+    if(fs::exists(path))fail("joint view output already exists: "+path.string());SourceKeys source(path);Bytes h(HEADER);memcpy(h.data(),VIEW_MAGIC,8);put32(h.data()+8,4);put32(h.data()+16,m.csize);put32(h.data()+20,selected);put64(h.data()+24,m.index.back());
+    auto raw=joint_metadata(m),packed=sxgc_positions::compress(raw);put64(h.data()+48,HEADER);put64(h.data()+56,packed.size());put64(h.data()+64,raw.size());put32(h.data()+72,crc(raw));put64(h.data()+80,HEADER+packed.size());source.bind(h);
+    Bytes extra;auto rel=fs::relative(root,path.parent_path()).string();varint(extra,rel.size());extra.insert(extra.end(),rel.begin(),rel.end());for(auto&map:maps){varint(extra,map.size());for(auto x:map){auto at=extra.size();extra.resize(at+4);put32(extra.data()+at,uint32_t(x));}}
+    File order(root/"joint.order");auto order_header=read_at(order.fd,0,HEADER);put32(h.data()+92,u32(order_header.data()+124));
+    put32(h.data()+88,crc(extra));put32(h.data()+124,crc32(0,h.data(),124));auto tmp=path;tmp+=".partial";FILE*f=fopen(tmp.c_str(),"wb");if(!f)fail("create joint view");write(f,h.data(),h.size());write(f,packed.data(),packed.size());write(f,extra.data(),extra.size());if(fflush(f)||fsync(fileno(f))||fclose(f))fail("flush joint view "+tmp.string()+": "+strerror(errno));fs::rename(tmp,path);
+}
+// The end of an N-sample bundle, shared by joint-pack-n and the fused stream build: joint.order's metadata (the
+// directory of per-sample rows and occurrences at every block start, then the companions' CRCs), one view per sample
+// (frequencies from cnt) and joint.names. The template archives, metas and copy files must already be in place.
+void joint_finish_n(Writer&order,const fs::path&root,const std::vector<std::string>&names,const std::vector<pm::Meta>&metas,std::vector<Metadata>views,
+                    const std::vector<std::vector<int64>>&cnt,const std::vector<std::vector<uint64_t>>&drows,const std::vector<std::vector<uint64_t>>&docc){
+    const unsigned N=unsigned(names.size());
+    Bytes meta;varint(meta,N);varint(meta,drows.size());for(size_t e=0;e<drows.size();++e){for(auto v:drows[e]){size_t i=meta.size();meta.resize(i+8);put64(meta.data()+i,v);}for(auto v:docc[e]){size_t i=meta.size();meta.resize(i+8);put64(meta.data()+i,v);}}
+    for(auto&name:joint_companions(N)){File f(root/name);auto bytes=read_at(f.fd,0,name.find(".sgr")!=std::string::npos?124:f.size);auto i=meta.size();meta.resize(i+4);put32(meta.data()+i,crc(bytes));}
+    auto packed=sxgc_positions::compress(meta);auto off=ftello(order.file());put64(order.h.data()+48,off);put64(order.h.data()+56,packed.size());put64(order.h.data()+64,meta.size());put32(order.h.data()+72,crc(meta));write(order.file(),packed.data(),packed.size());order.finish();
+    for(unsigned s=0;s<N;++s){auto&m=views[s];int64 total=0;m.maxpre=0;for(size_t i=0;i<cnt[s].size();++i){m.maxpre=std::max<int64_t>(m.maxpre,cnt[s][i]);total+=cnt[s][i];m.index[i]=total;}
+        std::vector<std::vector<int>>maps(N);for(unsigned t=0;t<N;++t){maps[t].assign(metas[t].contigs.size(),-1);if(t==s)for(size_t c=0;c<maps[t].size();++c)if(metas[t].contigs[c].forward!=UINT64_MAX)maps[t][c]=int(c);}
+        joint_write_view_n(root/(names[s]+".gix"),root,1u<<s,m,maps);}
+    std::ofstream out(root/"joint.names");for(auto&name:names)out<<name<<'\n';out.close();if(!out)fail("write joint sample names");
+}
 // Receives every selected row of both samples in one global key order and
 // computes what joint-pack's merge computes: joint.order (origin and weight per
 // row), its directory, and the per-prefix weighted counts of the target view.
@@ -120,5 +154,36 @@ public:
         joint_write_view(root/(an+".gix"),root,1,ma,amap,emptyB);joint_write_view(root/(bn+".gix"),root,2,mb,emptyA,bmap);
         std::ofstream names(root/"joint.names");names<<an<<'\n'<<bn<<'\n';names.close();if(!names)fail("write joint sample names");
         return "{\"format_version\":4,\"reference_rows\":"+std::to_string(ar)+",\"target_rows\":"+std::to_string(bt)+",\"residual_rows\":"+std::to_string(br)+",\"physical_rows\":"+std::to_string(order.count)+",\"copy_blocks\":"+std::to_string(copies.size())+",\"target_rows_after_equal_key_reference\":"+std::to_string(reordered)+"}";
+    }
+};
+// N samples (3..64): the state with which the range consumer (build_streams_ranged) computes, from the samples'
+// filtered streams, what build-stream + joint-pack-n compute from per-sample v3 archives. Ranges weigh their rows
+// through from[j] (the Stabs of sample j's copies into samples j+1..N-1, ascending) and count per-sample weighted
+// frequencies in cnt (ranges touch disjoint prefixes); the main thread keeps the directory and writes joint.order.
+class JointSinkN {
+public:
+    fs::path root;std::vector<std::string> names;unsigned N;std::vector<pm::Meta> metas;
+    std::vector<std::vector<std::vector<jc::Copy>>> copies;std::deque<jc::Stab> stabs;std::vector<std::vector<const jc::Stab*>> from;
+    std::vector<std::vector<int64>> cnt;Writer order;std::vector<std::vector<uint64_t>> drows,docc;std::vector<uint64_t> occ;
+    JointSinkN(const fs::path&dest,std::vector<std::string> sample_names,const fs::path&copydir,const std::vector<std::string>&meta_paths)
+      :root(dest),names(std::move(sample_names)),N(unsigned(names.size())),cnt(N,std::vector<int64>(1u<<24,0)),order(dest/"joint.order",ORDER_MAGIC,10),occ(N,0){
+        if(N<3||N>64||meta_paths.size()!=N)fail("N-sample joint output needs 3..64 samples and one meta per sample");
+        put32(order.h.data()+76,3);
+        for(auto&m:meta_paths)metas.push_back(pm::Meta::read(m));
+        copies.resize(N);for(unsigned i=1;i<N;++i){copies[i].resize(i);for(unsigned j=0;j<i;++j)copies[i][j]=jc::load((copydir/("joint."+std::to_string(i)+"."+std::to_string(j)+".copies")).string(),metas[j],metas[i]);}
+        from.resize(N);for(unsigned j=0;j<N;++j)for(unsigned i=j+1;i<N;++i){stabs.emplace_back(copies[i][j],metas[j].contigs.size(),encode_threads);from[j].push_back(&stabs.back());}
+        for(unsigned i=1;i<N;++i)for(unsigned j=0;j<i;++j)fs::copy_file(copydir/("joint."+std::to_string(i)+"."+std::to_string(j)+".copies"),root/joint_copy_name(i,j));
+        for(unsigned s=0;s<N;++s)fs::copy_file(meta_paths[s],root/joint_meta_name(s));
+    }
+    JointSinkN(const JointSinkN&)=delete;
+    // After the last range and the dictionary: the template archives, then joint_finish_n. rows: archive rows per sample.
+    template<class W> std::string finish(std::vector<std::unique_ptr<W>>&samples,const Writer&dictionary,const std::vector<uint64_t>&rows){
+        drows.push_back(rows);docc.push_back(occ);
+        for(unsigned s=0;s<N;++s)if(occ[s]!=metas[s].marks)fail("joint full occurrence accounting mismatch: sample "+std::to_string(s)+" has "+std::to_string(occ[s])+" of "+std::to_string(metas[s].marks));
+        std::vector<Metadata> views;for(auto&w:samples){w->finish_template(dictionary);views.push_back(w->template_meta);}
+        joint_finish_n(order,root,names,metas,std::move(views),cnt,drows,docc);
+        std::string out="{\"format_version\":4,\"order_codec\":3,\"samples\":"+std::to_string(N)+",\"physical_rows\":"+std::to_string(order.count)+",\"archive_rows\":[";
+        for(unsigned s=0;s<N;++s)out+=(s?",":"")+std::to_string(rows[s]);out+="],\"sample_occurrences\":[";
+        for(unsigned s=0;s<N;++s)out+=(s?",":"")+std::to_string(occ[s]);return out+"]}";
     }
 };

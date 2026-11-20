@@ -4,7 +4,8 @@ repeat families, satellites, low-complexity runs, a segmental paralog, an invers
 reverse-complemented contig and >127 small contigs per sample; one reference contig spans the 1 Mbp query-window seam.
 
 Checks: (1) every copy is byte-exact against the FASTA sequences (reverse copies against the reverse complement), >=40 bp,
-disjoint and sorted in the target; (2) copies.bin and the residual bitmap are identical at -T1/2/5/24; (3) the copied
+disjoint and sorted in the target; (2) copies.bin and the residual bitmap are identical at -T1/2/5/24 and with the
+minimizer table built and queried in 1 MiB parts (--index-mib 1, several parts); (3) the copied
 bases and residual occurrences are not worse than the token-suffix-array finder this finder replaced (numbers recorded
 below from that finder on this very fixture before it was removed); (4) copied bases against the independent upper
 bound 'target bases inside a 40-mer that occurs in the reference on either strand'."""
@@ -137,6 +138,13 @@ def main():
                 out.mkdir()
                 stdout = run([binary / 'joint-copy', text, work / 'marks-A', work / 'marks-B', out / 'copies', out / 'keep', t])
                 outputs[t] = (json.loads(stdout), (out / 'copies').read_bytes(), (out / 'keep').read_bytes())
+            for t in (2, 5):
+                out = root / f'parts-T{t}'
+                out.mkdir()
+                stdout = run([binary / 'joint-copy', text, work / 'marks-A', work / 'marks-B', out / 'copies', out / 'keep', t, '--index-mib', 1])
+                outputs[f'{t} --index-mib 1'] = (json.loads(stdout), (out / 'copies').read_bytes(), (out / 'keep').read_bytes())
+                if outputs[f'{t} --index-mib 1'][0]['index_parts'] < 2:
+                    raise RuntimeError('--index-mib 1 did not split the minimizer table: the fixture is too small to test parts')
             base = outputs[1]
             for t, value in outputs.items():
                 if value[1:] != base[1:]:
@@ -184,7 +192,8 @@ def main():
                 bound += sum(mark)
             report.update(copy_blocks=info['copy_blocks'], copied_bases=copied, residual_occurrences=info['residual_occurrences'],
                           upper_bound_bases=bound, copied_bases_cap8=capped_copied, k=info['k'], w=info['w'], max_occurrences=info['max_occurrences'],
-                          reanchored_copy_blocks=info['reanchored_copy_blocks'], deterministic_threads=[1, 2, 5, 24])
+                          reanchored_copy_blocks=info['reanchored_copy_blocks'], deterministic_threads=[1, 2, 5, 24],
+                          index_parts_mib1=outputs['2 --index-mib 1'][0]['index_parts'])
             if copied > bound or capped_copied > bound:
                 raise RuntimeError('more bases copied than any 40-mer-supported bound allows')
             old = dict(OLD_FINDER)

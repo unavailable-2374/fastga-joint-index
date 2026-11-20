@@ -7,6 +7,7 @@ struct BuildSettings {
     std::string storage="source",backend="native";
     fs::path pfp_tools;
     int window=10,modulus=100;
+    int copy_index_mib=0; // joint-copy --index-mib for joint storage of three or more samples (0: one part)
 };
 
 inline Json make_configuration(const fs::path &binary, const fs::path &driver, Json samples,
@@ -21,7 +22,12 @@ inline Json make_configuration(const fs::path &binary, const fs::path &driver, J
         throw std::runtime_error("storage must be legacy, positions, source, joint or native");
     bool joint=settings.storage=="joint",pfp=settings.backend=="pfp"; // joint copies come from the anchor finder; only the PFP backend sorts with Big-BWT
     bool upstream=settings.storage=="native"; // upstream GDB/GIX files, made by the upstream GIXmake
-    if (joint && samples.size()!=2) throw std::runtime_error("joint storage needs exactly two samples");
+    if (joint && samples.size()<2) throw std::runtime_error("joint storage needs at least two samples");
+    const bool many=joint && samples.size()>2; // N-sample joint bundle: each sample copies from all earlier ones
+    if (many && pfp) throw std::runtime_error("joint storage of three or more samples uses the native backend");
+    if (joint && samples.size()>64) throw std::runtime_error("joint storage holds at most 64 samples");
+    if (settings.copy_index_mib<0 || (settings.copy_index_mib && !many))
+        throw std::runtime_error("--copy-index-mib applies only to joint storage of three or more samples");
     if (joint && pfp && (settings.window!=10 || settings.modulus!=100)) throw std::runtime_error("joint v4 requires --pfp-window 10 --pfp-modulus 100 with the pfp backend");
     if (upstream && pfp) throw std::runtime_error("the native index is made by the upstream GIXmake; the pfp backend applies only to the shared index");
     std::vector<std::string> programs={"FAtoGDB"};
@@ -42,10 +48,12 @@ inline Json make_configuration(const fs::path &binary, const fs::path &driver, J
             hashes[key]=sha256(path);
         }
     }
-    return {{"schema",3},{"constructor","native-cpp"},{"driver",own.filename().string()},
+    Json config={{"schema",3},{"constructor","native-cpp"},{"driver",own.filename().string()},
             {"storage",settings.storage},{"backend",settings.backend},{"pfp_tools",settings.pfp_tools.string()},
             {"pfp_window",settings.window},{"pfp_modulus",settings.modulus},{"threads",threads},
             {"inputs",std::move(samples)},{"constructor_sha256",hashes}};
+    if (many) config["joint_copy_index_mib"]=settings.copy_index_mib; // only N-sample configurations carry it
+    return config;
 }
 
 inline void validate_identities(const Json &config) {
@@ -332,7 +340,8 @@ class FastaBuilder {
         report_["native_gix_materialized"]=true;
         write_text(stage_/"READY","FastGA upstream GIX\n");
     }
-    void native_streams(const std::string &storage, const std::map<std::string,std::string> &target_filter={},
+    // filters[i]: the environment that restricts sample i's producer to its residual seeds (joint storage).
+    void native_streams(const std::string &storage, const std::vector<std::map<std::string,std::string>> &filters={},
                         const std::vector<std::string> &extra={}) {
         const auto &samples=config_.at("inputs");
         // The sorters stream into the block encoder side by side: n producers of P
@@ -346,14 +355,16 @@ class FastaBuilder {
         // from one pool of T tokens: a producer is a third of the budget wide (P = max(1,T/3), 8 at -T24) and the consumer as wide as the
         // whole budget, so whichever side has work uses the threads the other leaves idle, while the threads that compute at
         // any moment never exceed -T (the gate records the peak).
+        // N-sample fused joint writer (three or more samples): the same shared pool, each producer max(1,T/n) wide.
         int n=static_cast<int>(samples.size()),producers=std::min(std::max(1,threads_/12),(threads_-1)/n),encoder=threads_-n*producers;
         std::vector<int> per(n,producers);
         int pool=0;
         int ranges=stream_ranges_;
         if (const char *value=std::getenv("FASTGA_SHARED_STREAM_RANGES"); value && ranges<0) ranges=std::stoi(value);
         // --ranges 0 is the serial consumer loop (the byte-level oracle); it does not take part in the token pool.
-        if (n==2 && !extra.empty() && threads_>=3 && ranges!=0) {
-            per.assign(n,std::max(1,threads_/3)); encoder=threads_; pool=threads_;
+        if (n>2 && !extra.empty() && ranges==0) throw std::runtime_error("the N-sample joint writer needs the range consumer (--ranges 1 or more)");
+        if (n>=2 && !extra.empty() && threads_>=3 && ranges!=0) {
+            per.assign(n,std::max(1,n==2?threads_/3:threads_/n)); encoder=threads_; pool=threads_;
         }
         if (const char *value=std::getenv("FASTGA_SHARED_NATIVE_SPLIT"); value && n==2) {
             int a=-1,b=-1,c=-1; char end=0;
@@ -398,7 +409,7 @@ class FastaBuilder {
         if (!sequential) ids.push_back(start("merge",merge,logs_/"merge.json",gate_environment));
         for (size_t i=0; i<samples.size(); ++i) {
             auto name=samples[i].at("sample").get<std::string>();
-            auto filter=(i==1)?target_filter:std::map<std::string,std::string>{};
+            auto filter=i<filters.size()?filters[i]:std::map<std::string,std::string>{};
             filter.insert(gate_environment.begin(),gate_environment.end());
             auto id=start(name,producer(samples[i],"GIXmake-direct",per[i]),streams[i],filter);
             if (sequential) {
@@ -419,6 +430,52 @@ class FastaBuilder {
             entry["token_seconds_unused"]=gate->free_ns/1e9; entry["token_seconds_unused_while_a_thread_waited"]=gate->free_waiting_ns/1e9;
             save();
             if (gate->peak>static_cast<unsigned>(pool)) throw std::runtime_error("compute budget gate peaked at "+std::to_string(gate->peak)+" over its "+std::to_string(pool)+" tokens");
+        }
+    }
+    // FASTGA_SHARED_JOINT_ORACLE=DIR (tests only): after the fused run, reruns the two-step path (per-sample v3 archives,
+    // then the pack) on a copy of the staged inputs into DIR/two-step, plus a fused run per FASTGA_SHARED_JOINT_REPLAY_THREADS
+    // and FASTGA_SHARED_JOINT_REPLAY_RANGES entry, for byte comparison.
+    void joint_oracle(const std::vector<fs::path> &staged, const std::function<void(bool)> &produce, const std::function<void()> &pack, bool two_step) {
+        const char *oracle=std::getenv("FASTGA_SHARED_JOINT_ORACLE");
+        if (!oracle) return;
+        if (two_step) throw std::runtime_error("FASTGA_SHARED_JOINT_ORACLE compares against the two-step path; unset FASTGA_SHARED_JOINT_TWO_STEP");
+        fs::path destination=oracle;
+        if (fs::exists(destination)) throw std::runtime_error("oracle output already exists: "+destination.string());
+        fs::create_directories(destination);
+        // Each variant runs on a fresh copy of the staged GDB inputs, so bundles differ only by what is compared.
+        auto variant=[&](const std::string &label, bool fused, int threads, int ranges=-1) {
+            auto fused_stage=stage_; auto fused_logs=logs_; auto *fused_processes=processes_; int fused_threads=threads_;
+            auto restore=[&] { stage_=fused_stage; logs_=fused_logs; processes_=fused_processes; threads_=fused_threads; verifying_=false; stream_ranges_=-1; };
+            Processes quiet(nullptr);
+            auto root=work_/("variant-"+label);
+            fs::create_directories(root/"logs"); fs::create_directories(root/"stage");
+            for (const auto &path:staged) fs::copy_file(path,root/"stage"/path.filename());
+            stage_=root/"stage"; logs_=root/"logs"; processes_=&quiet; threads_=threads; verifying_=true; stream_ranges_=ranges;
+            try { produce(fused); if (!fused) pack(); } catch (...) { restore(); throw; }
+            restore();
+            fs::create_directories(destination/label);
+            for (const auto &entry:fs::directory_iterator(root/"stage"))
+                if (entry.is_regular_file()) fs::copy_file(entry.path(),destination/label/entry.path().filename());
+            fs::remove_all(root);
+        };
+        variant("two-step",false,threads_);
+        if (const char *list=std::getenv("FASTGA_SHARED_JOINT_REPLAY_THREADS")) {
+            std::stringstream tokens(list); std::string token;
+            while (std::getline(tokens,token,',')) {
+                int t=std::stoi(token);
+                if (t<1 || t>threads_) throw std::runtime_error("FASTGA_SHARED_JOINT_REPLAY_THREADS entries must be between 1 and -T");
+                variant("fused-T"+token,true,t);
+            }
+        }
+        // FASTGA_SHARED_JOINT_REPLAY_RANGES=R,R,...: fused runs at the full budget with these range counts
+        // (0 is the serial consumer loop), in DIR/fused-R<r>.
+        if (const char *list=std::getenv("FASTGA_SHARED_JOINT_REPLAY_RANGES")) {
+            std::stringstream tokens(list); std::string token;
+            while (std::getline(tokens,token,',')) {
+                int r=std::stoi(token);
+                if (r<0 || r>65536) throw std::runtime_error("FASTGA_SHARED_JOINT_REPLAY_RANGES entries must be between 0 and 65536");
+                variant("fused-R"+token,true,threads_,r);
+            }
         }
     }
     void joint() {
@@ -467,7 +524,7 @@ class FastaBuilder {
         auto produce=[&](bool fused) {
             std::vector<std::string> extra;
             if (fused) extra={"--joint-copies",copies.string(),"--joint-reference-meta",(prefixes[0].string()+".meta"),"--joint-target-meta",original.string()};
-            if (backend()=="native") native_streams("joint-template",filter,extra);
+            if (backend()=="native") native_streams("joint-template",{{},filter},extra);
             else emit_pfp(prefixes,text,"joint-template",extra);
         };
         auto pack=[&] {
@@ -481,49 +538,83 @@ class FastaBuilder {
         produce(!two_step);
         if (two_step) { pack(); report_["joint_index"]=read_json(logs_/"joint-pack.json"); }
         else report_["joint_index"]=read_json(logs_/"merge.json").at("joint");
-        if (const char *oracle=std::getenv("FASTGA_SHARED_JOINT_ORACLE")) {
-            if (two_step) throw std::runtime_error("FASTGA_SHARED_JOINT_ORACLE compares against the two-step path; unset FASTGA_SHARED_JOINT_TWO_STEP");
-            fs::path destination=oracle;
-            if (fs::exists(destination)) throw std::runtime_error("oracle output already exists: "+destination.string());
-            fs::create_directories(destination);
-            // Each variant runs on a fresh copy of the staged GDB inputs, so bundles differ only by what is compared.
-            auto variant=[&](const std::string &label, bool fused, int threads, int ranges=-1) {
-                auto fused_stage=stage_; auto fused_logs=logs_; auto *fused_processes=processes_; int fused_threads=threads_;
-                auto restore=[&] { stage_=fused_stage; logs_=fused_logs; processes_=fused_processes; threads_=fused_threads; verifying_=false; stream_ranges_=-1; };
-                Processes quiet(nullptr);
-                auto root=work_/("variant-"+label);
-                fs::create_directories(root/"logs"); fs::create_directories(root/"stage");
-                for (const auto &path:staged) fs::copy_file(path,root/"stage"/path.filename());
-                stage_=root/"stage"; logs_=root/"logs"; processes_=&quiet; threads_=threads; verifying_=true; stream_ranges_=ranges;
-                try { produce(fused); if (!fused) pack(); } catch (...) { restore(); throw; }
-                restore();
-                fs::create_directories(destination/label);
-                for (const auto &entry:fs::directory_iterator(root/"stage"))
-                    if (entry.is_regular_file()) fs::copy_file(entry.path(),destination/label/entry.path().filename());
-                fs::remove_all(root);
-            };
-            variant("two-step",false,threads_);
-            if (const char *list=std::getenv("FASTGA_SHARED_JOINT_REPLAY_THREADS")) {
-                std::stringstream tokens(list); std::string token;
-                while (std::getline(tokens,token,',')) {
-                    int t=std::stoi(token);
-                    if (t<1 || t>threads_) throw std::runtime_error("FASTGA_SHARED_JOINT_REPLAY_THREADS entries must be between 1 and -T");
-                    variant("fused-T"+token,true,t);
-                }
-            }
-            // FASTGA_SHARED_JOINT_REPLAY_RANGES=R,R,...: fused runs at the full budget with these range counts
-            // (0 is the serial consumer loop), in DIR/fused-R<r>.
-            if (const char *list=std::getenv("FASTGA_SHARED_JOINT_REPLAY_RANGES")) {
-                std::stringstream tokens(list); std::string token;
-                while (std::getline(tokens,token,',')) {
-                    int r=std::stoi(token);
-                    if (r<0 || r>65536) throw std::runtime_error("FASTGA_SHARED_JOINT_REPLAY_RANGES entries must be between 0 and 65536");
-                    variant("fused-R"+token,true,threads_,r);
-                }
-            }
-        }
+        joint_oracle(staged,produce,pack,two_step);
         write_text(stage_/"READY","SXGC joint GIX 4\n");
         if (pfp && verify_pfp()!=manifest) throw std::runtime_error("PFP toolchain manifest changed during construction");
+    }
+    // Joint storage of three or more samples (native backend). Sample 0 is stored in full; sample i copies from all of
+    // samples 0..i-1 through a pseudo reference (sample 0 and the uncopied gaps of samples 1..i-1, one hop to a physical
+    // occurrence) and keeps its residual. Copy step i: joint-copy --pseudo, the collection text (pseudo reference, then
+    // sample i's marked text), the anchor finder, then --split into one copy table per source sample. The producers then
+    // stream every sample's residual seeds into the fused N-sample writer.
+    void joint_n() {
+        const auto &samples=config_.at("inputs");
+        const size_t n=samples.size();
+        std::vector<std::string> names;
+        for (const auto &sample:samples) names.push_back(sample.at("sample").get<std::string>());
+        report_["reference"]=names[0];
+        auto prefixes=mark_samples();
+        auto copydir=work_/"copies";
+        fs::create_directories(copydir);
+        const int index_mib=config_.at("joint_copy_index_mib").get<int>();
+        auto joint_copy=(binary_/"joint-copy").string();
+        auto step_path=[&](const char *what, size_t i) { return work_/(std::string(what)+"-"+std::to_string(i)); };
+        std::vector<std::map<std::string,std::string>> filters(n);
+        report_["joint_copies"]=Json::array(); report_["joint_filters"]=Json::object();
+        for (size_t i=1; i<n; ++i) {
+            const auto step=std::to_string(i);
+            auto pseudo=step_path("pseudo",i),pieces=step_path("pieces",i),copies=step_path("copies",i),keep=step_path("keep",i);
+            Command make={joint_copy,"--pseudo",pseudo.string(),pieces.string(),prefixes[0].string()};
+            for (size_t j=1; j<i; ++j) make.insert(make.end(),{prefixes[j].string(),step_path("pseudo",j).string(),step_path("copies",j).string()});
+            allot("pseudo-"+step,{{"pseudo-"+step,1}});
+            run("pseudo-"+step,make,logs_/("pseudo-"+step+".json"));
+            auto text=work_/("collection-"+step+".text");
+            concatenate({pseudo.string()+".text",prefixes[i].string()+".text"},text);
+            fs::remove(pseudo.string()+".text"); // later steps read only the pseudo reference's metadata
+            if (fs::file_size(text)>=(uint64_t(1)<<40)) throw std::runtime_error("collection text exceeds the 5-byte coordinate limit");
+            allot("joint-copy-"+step,{{"joint-copy-"+step,threads_}});
+            Command finder={joint_copy,text.string(),pseudo.string(),prefixes[i].string(),copies.string(),keep.string(),std::to_string(threads_)};
+            if (const char *cap=std::getenv("FASTGA_SHARED_ANCHOR_MAX_OCCURRENCES")) { finder.push_back("--max-occurrences"); finder.push_back(cap); }
+            if (index_mib) { finder.push_back("--index-mib"); finder.push_back(std::to_string(index_mib)); }
+            run("joint-copy-"+step,finder,logs_/("joint-copy-"+step+".json"));
+            fs::remove(text);
+            Command split={joint_copy,"--split",pieces.string(),pseudo.string(),prefixes[i].string(),copies.string(),copydir.string(),step};
+            for (size_t j=0; j<i; ++j) split.push_back(prefixes[j].string());
+            allot("split-"+step,{{"split-"+step,1}});
+            run("split-"+step,split,logs_/("split-"+step+".json"));
+            auto found=read_json(logs_/("joint-copy-"+step+".json"));
+            found["sample"]=names[i]; found["pseudo_reference"]=read_json(logs_/("pseudo-"+step+".json"));
+            found["by_source"]=read_json(logs_/("split-"+step+".json")).at("by_source");
+            report_["joint_copies"].push_back(found);
+            filters[i]={{"SXGC_JOINT_KEEP",keep.string()},{"SXGC_JOINT_MARK_PREFIX",prefixes[i].string()}};
+            report_["joint_filters"][names[i]]=filters[i];
+            save();
+        }
+        std::string metas;
+        for (size_t i=0; i<n; ++i) metas+=(i?",":"")+prefixes[i].string()+".meta";
+        auto produce=[&](bool fused) {
+            std::vector<std::string> extra;
+            if (fused) extra={"--joint-copy-dir",copydir.string(),"--joint-metas",metas};
+            native_streams("joint-template",filters,extra);
+        };
+        auto pack=[&] {
+            allot("joint-pack",{{"joint-pack",threads_}});
+            Command command={(binary_/"gixshare").string(),"joint-pack-n",stage_.string(),std::to_string(n)};
+            command.insert(command.end(),names.begin(),names.end());
+            for (const auto &prefix:prefixes) command.push_back(prefix.string()+".meta");
+            command.insert(command.end(),{copydir.string(),"--threads",std::to_string(threads_)});
+            run("joint-pack",command,logs_/"joint-pack.json");
+        };
+        // FASTGA_SHARED_JOINT_TWO_STEP and FASTGA_SHARED_JOINT_ORACLE as for two samples (joint-pack-n is the pack).
+        const bool two_step=std::getenv("FASTGA_SHARED_JOINT_TWO_STEP")!=nullptr;
+        std::vector<fs::path> staged;
+        for (const auto &entry:fs::directory_iterator(stage_)) if (entry.is_regular_file()) staged.push_back(entry.path());
+        report_["joint_fused"]=!two_step;
+        produce(!two_step);
+        if (two_step) { pack(); report_["joint_index"]=read_json(logs_/"joint-pack.json"); }
+        else report_["joint_index"]=read_json(logs_/"merge.json").at("joint");
+        joint_oracle(staged,produce,pack,two_step);
+        write_text(stage_/"READY","SXGC joint GIX 4 (N samples)\n");
     }
     // FASTGA_SHARED_RANGES_ORACLE=DIR (tests only, native backend, non-joint storages): reruns the stream
     // consumer on a copy of the staged inputs for each FASTGA_SHARED_JOINT_REPLAY_RANGES entry (0 is the
@@ -597,7 +688,8 @@ public:
                 }
                 wait(conversions);
             }
-            if (storage=="joint") joint();
+            if (storage=="joint" && config_.at("inputs").size()>2) joint_n();
+            else if (storage=="joint") joint();
             else if (storage=="native") upstream_gix();
             else if (backend()=="pfp") independent_pfp(storage);
             else {
@@ -622,8 +714,10 @@ public:
                 if (name.find(".ktab.")!=std::string::npos && !upstream_part)
                     throw std::runtime_error("native ktab intermediate was materialized unexpectedly");
                 report_["retained_files"][name]=size;
-                if (entry.path().extension()==".gix" || upstream_part || name=="sequences.sgd" || name=="READY" || name=="reference.sgr" ||
-                    name=="residual.sgr" || name=="reference.meta" || name=="target.meta" || name.rfind("joint.",0)==0) {
+                auto extension=entry.path().extension();
+                if (extension==".gix" || upstream_part || name=="sequences.sgd" || name=="READY" || name=="reference.sgr" ||
+                    name=="reference.meta" || name.rfind("joint.",0)==0 || // residual[.i].sgr and target[.i].meta: one per later sample
+                    (name.rfind("residual.",0)==0 && extension==".sgr") || (name.rfind("target.",0)==0 && extension==".meta")) {
                     report_["index_files"][name]=size; bytes+=size;
                 }
             }

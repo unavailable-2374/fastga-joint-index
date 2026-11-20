@@ -1,6 +1,7 @@
 # Joint FastGA indexes, version 4 (physical position archives: container version 5)
 
-This is an opt-in, lossless, two-genome relative occurrence index. It is built
+This is an opt-in, lossless relative occurrence index of two genomes, or of 3–64
+genomes (see [Three or more samples](#three-or-more-samples)). It is built
 from FASTA without a native GIX intermediate. Native sampling, multiplicity,
 prefix selection, frequency cutoffs, masking, chaining and local alignment
 remain the reference contract. Identical sequence occurrences are not deduplicated
@@ -8,7 +9,9 @@ biologically. A, B and a merged GDB use views of the same physical index.
 
 ## Construction
 
-`GIXmake-shared --storage joint --reference A` requires exactly two named inputs.
+`GIXmake-shared --storage joint --reference A` with two named inputs builds the
+two-sample bundle described first; three or more inputs build the N-sample bundle
+of the last section, which extends it.
 Native selected-position bitmaps are collected for both strands, together with
 the oriented marked texts (each contig forward and reverse-complemented).
 
@@ -181,6 +184,67 @@ ends. No per-sample v3 archive is written and no second pass decodes one.
 `FASTGA_SHARED_JOINT_TWO_STEP=1` selects the two-step path, and
 `tests/test_joint_fused.py` reruns both on copies of the same staged inputs and
 requires identical bytes (every thread count, both backends).
+
+## Three or more samples
+
+`GIXmake-shared` with 3–64 inputs and `--storage joint` (also the `auto` choice
+with the native backend) builds one bundle for all samples. Input order is the
+storage order: sample 0 (the `--reference`, by default the first input) is stored
+in full, and sample i copies from samples 0..i-1. The pfp backend has no N-sample
+writer and is rejected.
+
+Copy step i (i = 1..N-1) runs `joint-copy` against a pseudo reference made of
+every contig of sample 0 and every gap of at least 40 bp of samples 1..i-1 outside
+their copies, each as its own contig, with the selection bits of the 40-mer
+windows lying wholly inside it. Every such window is a residual occurrence, so a
+copy onto the pseudo reference resolves to a physical occurrence in one hop.
+`joint-copy --pseudo` writes the pseudo text, bits, meta and the piece list
+(source sample, contig, offset, length per pseudo contig); the finder of the
+two-sample construction runs on the pseudo text followed by sample i's marked
+text, with the same 40-mer selection-bit check of every copy; `joint-copy --split`
+maps its copies back to source-sample coordinates, one table per source sample.
+Step i's residual bitmap filters sample i's producer. `--copy-index-mib M` builds
+the finder's minimizer table (10 bytes per pseudo-reference minimizer) in parts
+of at most M MiB, each a range of whole hash buckets, and queries every target
+window once per part; the per-window shortcuts restart per part and the merged
+copies are filtered again, so the copies do not depend on the part count. Each
+extra part rescans the pseudo reference.
+
+Files, in addition to the views and GDB/BPS sequence files of every sample:
+
+* `reference.sgr` (sample 0), `residual.sgr` (sample 1), `residual.<s>.sgr`
+  (s >= 2): the physical archives, in the template layout above.
+* `reference.meta`, `target.meta`, `target.<s>.meta`: per-sample PFP metadata
+  (contigs, oriented-text offsets, masks, selected-position count).
+* `joint.copies` (sample 1 from sample 0) and `joint.<i>.<j>.copies` (sample i
+  from sample j < i): `SXGCOPY5` copy tables in source-sample coordinates.
+* `joint.order`: `SXGORDR5`, header word 76 = 3 (order codec 3; two-sample
+  bundles use 1 or 2, and readers reject other values). Per 4096-row block:
+  ceil(log2 N) origin bitplanes (the sample whose archive holds the physical
+  row), one nonzero-weight bitplane per sample 1..N-1 (the number of that
+  sample's occurrences the row stands for, through its copies), then per sample
+  1..N-1 a varint count and (row delta, weight) varint pairs for weights above 1,
+  then the LCP plane. The order metadata holds N, the number of directory
+  entries, at every 4096-row block start N physical row counts and N occurrence
+  counts (`uint64`), then the CRC-32 of every companion: the first 124 header
+  bytes of each archive and the whole of each meta and copy table, in that order.
+* `<sample>.gix`: one view per sample, selection bit `1 << s`, with one contig
+  map per sample (only its own sample's contigs mapped); a merged view
+  (`gixshare view --samples` in storage order) selects several samples.
+* `joint.names`: one sample name per line, in storage order. `READY` reads
+  `SXGC joint GIX 4 (N samples)`.
+
+The fused writer (`gixshare build-stream --joint-copy-dir DIR --joint-metas
+M0,...,MN-1`, range consumer only) receives every sample's residual stream over a
+FIFO, weighs each row through Stabs of the later samples' copies and writes the
+bundle in one pass; the producers and the consumer share one pool of -T compute
+tokens. `gixshare joint-pack-n` builds the same bundle from per-sample v3
+archives and is the oracle (`FASTGA_SHARED_JOINT_TWO_STEP=1` selects it,
+`FASTGA_SHARED_JOINT_ORACLE=DIR` reruns it next to the fused build).
+`tests/test_joint_nsample.py` (SIMULATED fixtures) requires identical bytes for
+the fused, two-step, thread-count and range-count variants, identical rows for
+another -T and `--copy-index-mib`, and `gixshare verify-equivalent` against
+upstream GIXmake for every sample, with and without soft masks.
 
 ## Validation and accounting
 

@@ -46,14 +46,8 @@ static inline void sxgc_gate_die(const char *what) {
     exit(1);
 }
 
-/* Creates the gate file with `tokens` tokens (the builder, before it starts the programs). */
-static inline sxgc_gate_t *sxgc_gate_create(const char *path, unsigned tokens) {
-    int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
-    if (fd < 0) sxgc_gate_die("cannot create the gate file");
-    if (ftruncate(fd, sizeof(sxgc_gate_t)) < 0) sxgc_gate_die("cannot size the gate file");
-    sxgc_gate_t *g = (sxgc_gate_t *) mmap(NULL, sizeof(sxgc_gate_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
-    if (g == (sxgc_gate_t *) MAP_FAILED) sxgc_gate_die("cannot map the gate file");
+/* Initialises a mapped gate with `tokens` tokens. */
+static inline void sxgc_gate_init(sxgc_gate_t *g, unsigned tokens) {
     pthread_mutexattr_t ma;
     pthread_condattr_t ca;
     pthread_mutexattr_init(&ma);
@@ -70,6 +64,17 @@ static inline sxgc_gate_t *sxgc_gate_create(const char *path, unsigned tokens) {
     g->last_ns = sxgc_gate_now();
     g->free_ns = g->free_waiting_ns = 0;
     __atomic_store_n(&g->magic, SXGC_GATE_MAGIC, __ATOMIC_RELEASE);
+}
+
+/* Creates the gate file with `tokens` tokens (the builder, before it starts the programs). */
+static inline sxgc_gate_t *sxgc_gate_create(const char *path, unsigned tokens) {
+    int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) sxgc_gate_die("cannot create the gate file");
+    if (ftruncate(fd, sizeof(sxgc_gate_t)) < 0) sxgc_gate_die("cannot size the gate file");
+    sxgc_gate_t *g = (sxgc_gate_t *) mmap(NULL, sizeof(sxgc_gate_t), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (g == (sxgc_gate_t *) MAP_FAILED) sxgc_gate_die("cannot map the gate file");
+    sxgc_gate_init(g, tokens);
     return g;
 }
 
@@ -93,6 +98,16 @@ static void sxgc_gate_open(void) {
 static inline sxgc_gate_t *sxgc_gate_get(void) {
     pthread_once(&sxgc_gate_once, sxgc_gate_open);
     return sxgc_gate_ptr;
+}
+/* Without an attached gate, gives this program (this translation unit) a private gate of `tokens` tokens: a program
+   whose side threads mostly wait (stream readers) can then keep a worker for every token and still never compute on
+   more than `tokens` threads at once. Call before any thread uses the gate. */
+static inline void sxgc_gate_private(unsigned tokens) {
+    if (sxgc_gate_get()) return;
+    sxgc_gate_t *g = (sxgc_gate_t *) mmap(NULL, sizeof(sxgc_gate_t), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (g == (sxgc_gate_t *) MAP_FAILED) sxgc_gate_die("cannot map a private gate");
+    sxgc_gate_init(g, tokens);
+    sxgc_gate_ptr = g;
 }
 
 /* Takes a token, waiting for one. hi: latency-critical threads go before the ordinary waiters. */

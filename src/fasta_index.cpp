@@ -9,8 +9,10 @@ void index_help() {
         "Usage: GIXmake-shared --input SAMPLE=FASTA [--input SAMPLE=FASTA ...] --output NEW_DIRECTORY [options]\n\n"
         "  -T<N>, --threads N       Total construction budget, 1..32 (default 8)\n"
         "  --storage MODE          auto|joint|source|positions|legacy (default auto)\n"
-        "                          auto: joint for two inputs, source otherwise\n"
-        "  --reference SAMPLE      Joint reference (default first input); exactly two inputs\n"
+        "                          auto: joint for two or more inputs (two with --backend pfp),\n"
+        "                          source otherwise\n"
+        "  --reference SAMPLE      Joint reference, stored in full (default first input); with\n"
+        "                          three or more inputs each later input copies from all earlier ones\n"
         "  --backend MODE          native|pfp sorting (default native)\n"
         "                          PFP sorting needs at least 2 threads\n"
         "  --mask SAMPLE=ANNOTATION Add an explicit mask; may be repeated\n"
@@ -18,6 +20,9 @@ void index_help() {
         "  --pfp-window N          PFP window, >=4 (default 10)\n"
         "  --pfp-modulus N         PFP modulus, >=10 (default 100)\n"
         "                          Joint v4 requires window 10, modulus 100\n"
+        "  --copy-index-mib N      Joint storage of three or more inputs: build the copy finder's\n"
+        "                          minimizer table in parts of at most N MiB (default 0: one part);\n"
+        "                          lowers its peak memory, same index\n"
         "  --scratch DIRECTORY     Temporary files ($TMPDIR or current directory)\n"
         "  --log-dir DIRECTORY     New log directory (default OUTPUT.build-logs)\n"
         "  --bin DIRECTORY         Native helper directory (default executable directory)\n"
@@ -74,6 +79,7 @@ int index_main(int argc, char **argv) {
         else if (option=="--pfp-tools") settings.pfp_tools=value;
         else if (option=="--pfp-window") settings.window=index_integer(value,option);
         else if (option=="--pfp-modulus") settings.modulus=index_integer(value,option);
+        else if (option=="--copy-index-mib") settings.copy_index_mib=index_integer(value,option);
         else if (option=="--mask") annotations.push_back(value);
         else if (option=="--implicit-mask") implicit.push_back(value);
         else throw std::runtime_error("unrecognized option: "+option);
@@ -112,7 +118,7 @@ int index_main(int argc, char **argv) {
         auto path=fs::canonical(item.second);
         sample_for(item.first)["masks"].push_back({{"path",path.string()},{"sha256",sha256(path)}});
     }
-    if (settings.storage=="auto") settings.storage=samples.size()==2?"joint":"source";
+    if (settings.storage=="auto") settings.storage=samples.size()==2 || (samples.size()>2 && settings.backend=="native")?"joint":"source";
     if (settings.storage=="joint") {
         if (reference.empty()) reference=samples[0].at("sample").get<std::string>();
         sample_for(reference);

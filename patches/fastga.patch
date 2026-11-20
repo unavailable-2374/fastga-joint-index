@@ -4810,7 +4810,29 @@ diff --git a/ALNtoPSL.c b/ALNtoPSL.c
  
  #include "GDB.h"
  #include "align.h"
-@@ -561,7 +562,10 @@
+@@ -205,10 +206,11 @@
+ 
+         { // trim trailing INDEL
+           // better fix needed
++          //   (T > 0: an alignment without INDELs has an empty trace, so t[T-1] would read t[-1])
+           int trim;
+           
+           trim = 0;
+-          while (t[T-1] == -path->aepos-1)
++          while (T > 0 && t[T-1] == -path->aepos-1)
+             { trim++;
+               T--;
+             }
+@@ -220,7 +222,7 @@
+             }
+           
+           trim = 0;
+-          while (t[T-1] == path->bepos+1)
++          while (T > 0 && t[T-1] == path->bepos+1)
+             { trim++;
+               T--;
+             }
+@@ -561,7 +563,10 @@
        gen_psl(parm+p);
  #else
      for (p = 1; p < NTHREADS; p++)
@@ -4822,7 +4844,7 @@ diff --git a/ALNtoPSL.c b/ALNtoPSL.c
      gen_psl(parm);
      for (p = 1; p < NTHREADS; p++)
        pthread_join(threads[p],NULL);
-@@ -578,6 +582,16 @@
+@@ -578,6 +583,16 @@
  	  free(units2);
        }
  
@@ -4839,7 +4861,7 @@ diff --git a/ALNtoPSL.c b/ALNtoPSL.c
      //  Concatenate thread generated paf parts to stdout
  
  #define PUSH_BLOCK 0x100000
-@@ -592,7 +606,16 @@
+@@ -592,7 +607,16 @@
          while (x >= PUSH_BLOCK)
            { x = fread(buffer,1,PUSH_BLOCK,o);
              if (x > 0)
@@ -4857,7 +4879,7 @@ diff --git a/ALNtoPSL.c b/ALNtoPSL.c
            }
          fclose(o);
        }
-@@ -605,6 +628,12 @@
+@@ -605,6 +629,12 @@
      Close_GDB(gdb2);
  
    oneFileClose(input);

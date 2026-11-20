@@ -197,6 +197,8 @@ if(SJ_PYTHON_TESTS)
     --report "${CMAKE_BINARY_DIR}/test-results/joint.json")
   add_test(NAME joint-copy-finder COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_joint_copy.py"
     --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/joint-copy.json")
+  add_test(NAME joint-nsample COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_joint_nsample.py"
+    --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/joint-nsample.json")
   add_test(NAME fasta-entry-point COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_fasta_cli.py"
     --bin "${CMAKE_BINARY_DIR}" --report "${CMAKE_BINARY_DIR}/test-results/fasta-cli.json")
   set_tests_properties(fasta-entry-point PROPERTIES

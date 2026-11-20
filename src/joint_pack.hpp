@@ -8,7 +8,8 @@ void joint_order_block(Writer&w,const Bytes&raw,unsigned n){
 }
 // Writes the template archive of a v3 joint-template archive: version 5 re-encodes each
 // block as bit-packed coordinates; version 4 (domain too wide) copies blocks in large runs.
-void joint_compact_write(const fs::path&temporary,const Shared&source){
+// pooled: re-encode the blocks on the pool (ordered, same bytes); only for a caller that is not itself a pool job.
+void joint_compact_write(const fs::path&temporary,const Shared&source,bool pooled=false){
     auto&m=source.m;
     Writer out(temporary,TEMPLATE_MAGIC,10);out.h=source.a.h;memcpy(out.h.data(),TEMPLATE_MAGIC,8);
     // Version 5 re-encodes every block as bit-packed global coordinates (same bytes as the direct writer).
@@ -18,9 +19,11 @@ void joint_compact_write(const fs::path&temporary,const Shared&source){
     const auto&blocks=source.a.blocks;
     if(out.domain){
         for(size_t i=0;i<blocks.size();++i){
-            auto raw=sxgc_positions::unpack(source.a.decode(i),blocks[i].codec,blocks[i].count,m.post,m.cont);
-            auto p=sxgc_positions::pack(raw,blocks[i].count,m.post,m.cont,out.domain.get());
-            auto c=crc(p.raw);out.append(Encoded{std::move(p.raw),std::move(p.packed),c,p.codec,p.legacy_bytes},blocks[i].count);out.count+=blocks[i].count;
+            auto encode=[&source,&m,i,domain=out.domain]{const auto&b=source.a.blocks[i];
+                auto raw=sxgc_positions::unpack(source.a.decode(i),b.codec,b.count,m.post,m.cont);
+                auto p=sxgc_positions::pack(raw,b.count,m.post,m.cont,domain.get());
+                auto c=crc(p.raw);return Encoded{std::move(p.raw),std::move(p.packed),c,p.codec,p.legacy_bytes};};
+            if(pooled)out.submit(encode,blocks[i].count);else{out.append(encode(),blocks[i].count);out.count+=blocks[i].count;}
         }
     }else{
     constexpr uint64_t RUN=16u<<20;
@@ -130,9 +133,164 @@ void joint_pack(const fs::path&root,const std::string&an,const std::string&bn,co
     std::ofstream names(root/"joint.names");names<<an<<'\n'<<bn<<'\n';names.close();if(!names)fail("write joint sample names");
     std::cout<<"{\"format_version\":4,\"reference_rows\":"<<ac<<",\"target_rows\":"<<bt<<",\"residual_rows\":"<<br<<",\"physical_rows\":"<<order.count<<",\"copy_blocks\":"<<copies.size()<<"}\n";
 }
+// ---- N samples (order codec 3): the shared writers are in joint_emit.hpp ----
+// One decoded block of a sorted N-sample archive: keys, and for archive j the weight of every later sample from its copy trees.
+struct PackBlockN{std::vector<PackRow>keys;std::vector<uint64_t>weights;}; // weights: row-major, trees.size() per row
+PackBlockN pack_decode_n(const Shared&shared,const std::vector<const jc::Stab*>&trees,uint64_t b){
+    const auto&m=shared.m;unsigned ibyte=m.ibyte,hbyte=m.kmer/4-ibyte,pbyte=hbyte+m.csize;
+    Bytes decoded,keys;uint64_t keyblock=UINT64_MAX;std::vector<uint32_t>prefixes;
+    decode_block(shared,b,ibyte,hbyte,pbyte,decoded,keys,keyblock,&prefixes);
+    PackBlockN out;size_t n=prefixes.size();out.keys.resize(n);out.weights.resize(n*trees.size());
+    for(size_t i=0;i<n;++i){
+        auto p=decoded.data()+i*pbyte;uint64_t hi=uint64_t(prefixes[i])<<40;for(unsigned j=0;j<5;++j)hi|=uint64_t(p[j])<<(32-8*j);
+        out.keys[i]={hi,(uint64_t(p[5])<<8)|p[6]};
+        if(trees.empty())continue;
+        auto q=p+hbyte;uint64_t pos=sxgc_positions::number(q+2,m.post),rank=sxgc_positions::number(q+2+m.post,m.cont);bool rev=rank>>(8*m.cont-1);rank&=~(uint64_t(1)<<(8*m.cont-1));
+        if(rank>=m.perm.size()||(rev&&pos<40))fail("invalid joint pack source coordinate");
+        for(size_t t=0;t<trees.size();++t)out.weights[i*trees.size()+t]=trees[t]->count(m.perm[rank],rev?pos-40:pos);
+    }
+    return out;
+}
+// Rows [begin,end) of one archive, decoded block by block on the calling thread.
+class RangeFeedN{
+    const Shared&shared;const std::vector<const jc::Stab*>&trees;uint64_t row,end;PackBlockN block;size_t at=0;
+    void load(){block=pack_decode_n(shared,trees,row/BLOCK);at=row%BLOCK;if(at>=block.keys.size())fail("joint pack range outside its archive block");}
+public:
+    RangeFeedN(const Shared&s,const std::vector<const jc::Stab*>&t,uint64_t b,uint64_t e):shared(s),trees(t),row(b),end(e){if(row<end)load();}
+    bool more()const{return row<end;}
+    void step(){++row;++at;if(row<end&&at==block.keys.size())load();}
+    const PackRow&key()const{return block.keys[at];}
+    uint64_t weight(size_t t)const{return block.weights[at*trees.size()+t];}
+};
+// Order rows of one block, or of the part of a block that one merge range covers.
+struct OrderPieceN{uint64_t block;unsigned offset,count=0;std::vector<unsigned char>origin,lcp;std::vector<std::vector<uint64_t>>weight;
+    OrderPieceN(uint64_t k,unsigned off,unsigned N):block(k),offset(off),origin(BLOCK),lcp(BLOCK),weight(N-1,std::vector<uint64_t>(BLOCK,0)){}};
+Encoded joint_order_encode_n(const OrderPieceN&b,unsigned N){auto raw=joint_order_raw_n(b.origin.data(),b.weight,b.lcp.data(),b.count,N);auto packed=sxgc_positions::compress(raw);auto c=crc(raw);return Encoded{std::move(raw),std::move(packed),c,0,0};}
+// What one merge range (a run of 24-bit key prefixes) produces: whole order blocks already encoded, the partial blocks at
+// its ends raw (the main thread joins them with the neighbouring ranges), and for every block that starts inside the range
+// the per-sample row and occurrence counts from the range start.
+struct RangeOutN{
+    struct Item{uint64_t block;unsigned count;std::shared_ptr<Encoded>whole;std::shared_ptr<OrderPieceN>part;};
+    std::vector<Item>items;std::vector<std::vector<uint64_t>>dir;std::vector<uint64_t>rows,occ;
+};
+// gixshare joint-pack-n ROOT N NAME_0..NAME_{N-1} META_0..META_{N-1} COPYDIR: ROOT holds NAME_s.gix (sample 0 complete,
+// sample s >= 1 its residual); META_s are the samples' original metas; COPYDIR holds joint.<i>.<j>.copies for every
+// target i and earlier source j. Writes the codec-3 bundle (see joint_companions) and one view NAME_s.gix per sample.
+void joint_pack_n(const fs::path&root,const std::vector<std::string>&names,const std::vector<fs::path>&meta_paths,const fs::path&copydir){
+    const unsigned N=unsigned(names.size());if(N<3||N>64||meta_paths.size()!=N)fail("joint-pack-n needs 3..64 samples and a meta per sample");
+    auto t0=std::chrono::steady_clock::now();auto phase=[&](const char*name){std::fprintf(stderr,"joint-pack-n: %s done at %.1f s\n",name,std::chrono::duration<double>(std::chrono::steady_clock::now()-t0).count());};
+    std::vector<std::shared_ptr<Shared>>arch;std::vector<pm::Meta>metas;
+    for(unsigned s=0;s<N;++s){arch.push_back(std::make_shared<Shared>(root/(names[s]+".gix")));if(arch.back()->a.version!=3)fail("joint pack needs v3 sample archives");metas.push_back(pm::Meta::read(meta_paths[s].string()));}
+    std::vector<std::vector<std::vector<jc::Copy>>>copies(N);std::deque<jc::Stab>trees;std::vector<std::vector<const jc::Stab*>>feeds_trees(N);
+    for(unsigned i=1;i<N;++i){copies[i].resize(i);for(unsigned j=0;j<i;++j)copies[i][j]=jc::load((copydir/("joint."+std::to_string(i)+"."+std::to_string(j)+".copies")).string(),metas[j],metas[i]);}
+    for(unsigned j=0;j<N;++j)for(unsigned i=j+1;i<N;++i){trees.emplace_back(copies[i][j],metas[j].contigs.size(),encode_threads);feeds_trees[j].push_back(&trees.back());}
+    for(unsigned i=1;i<N;++i)for(unsigned j=0;j<i;++j)fs::copy_file(copydir/("joint."+std::to_string(i)+"."+std::to_string(j)+".copies"),root/joint_copy_name(i,j));
+    for(unsigned s=0;s<N;++s)fs::copy_file(meta_paths[s],root/joint_meta_name(s));
+    phase("copy trees");
+    // The merge runs as independent ranges of 24-bit key prefixes: a prefix's rows sit at the same index range in every
+    // archive, rows of different prefixes always have LCP code 0, and each prefix's frequencies are counted by one range,
+    // so the ranges' rows, joined in order, are exactly those of one serial merge. Ranges are pool jobs that decode inline.
+    Writer order(root/"joint.order",ORDER_MAGIC,10);put32(order.h.data()+76,3);
+    std::vector<std::vector<uint64_t>>drows,docc;std::vector<uint64_t>rows(N,0),occ(N,0);std::vector<std::vector<int64>>cnt(N,std::vector<int64>(1u<<24,0));
+    auto start=[&](unsigned s,uint32_t p)->uint64_t{return p?uint64_t(arch[s]->m.index[p-1]):0;};
+    std::vector<uint32_t>cut{0};{
+        uint64_t total=0;for(unsigned s=0;s<N;++s)total+=start(s,1u<<24);
+        const uint64_t target=std::max<uint64_t>(uint64_t(BLOCK)*256,total/(16*std::max(1u,encode_threads)+1));uint64_t done=0,next=target;
+        for(uint32_t p=1;p<(1u<<24);++p){uint64_t r=0;for(unsigned s=0;s<N;++s)r+=start(s,p);if(r>=next){cut.push_back(p);done=r;next=done+target;}}
+        cut.push_back(1u<<24);
+    }
+    auto merge_range=[&](size_t r){
+        auto out=std::make_shared<RangeOutN>();out->rows.assign(N,0);out->occ.assign(N,0);
+        std::vector<std::unique_ptr<RangeFeedN>>feeds;uint64_t g=0;
+        for(unsigned s=0;s<N;++s){feeds.push_back(std::make_unique<RangeFeedN>(*arch[s],feeds_trees[s],start(s,cut[r]),start(s,cut[r+1])));g+=start(s,cut[r]);}
+        std::shared_ptr<OrderPieceN>piece;
+        auto close=[&]{if(!piece)return;if(piece->offset==0&&piece->count==BLOCK)out->items.push_back({piece->block,BLOCK,std::make_shared<Encoded>(joint_order_encode_n(*piece,N)),nullptr});
+            else out->items.push_back({piece->block,piece->count,nullptr,piece});piece.reset();};
+        PackRow previous{0,0};bool have_key=false; // the previous range ends in another prefix: code 0, as for the first row
+        for(;;++g){
+            int j=-1;for(unsigned s=0;s<N;++s)if(feeds[s]->more()&&(j<0||feeds[s]->key().hi<feeds[j]->key().hi||(feeds[s]->key().hi==feeds[j]->key().hi&&feeds[s]->key().lo<feeds[j]->key().lo)))j=int(s);
+            if(j<0)break;
+            const uint64_t k=g/BLOCK;const unsigned at=unsigned(g%BLOCK);
+            if(!at){std::vector<uint64_t>d(out->rows);d.insert(d.end(),out->occ.begin(),out->occ.end());out->dir.push_back(std::move(d));}
+            if(!piece||piece->block!=k){close();piece=std::make_shared<OrderPieceN>(k,at,N);}
+            const PackRow key=feeds[j]->key();auto prefix=key.hi>>40;unsigned n=piece->offset+piece->count;
+            piece->origin[n]=uint8_t(j);++out->rows[j];
+            for(unsigned s=0;s<N;++s){uint64_t w=s==unsigned(j)?1:s>unsigned(j)?feeds[j]->weight(s-j-1):0;
+                if(s)piece->weight[s-1][n]=w;
+                if(w>uint64_t(INT64_MAX)-out->occ[s]||w>uint64_t(INT64_MAX)-uint64_t(cnt[s][prefix]))fail("joint frequency overflow");out->occ[s]+=w;cnt[s][prefix]+=int64(w);}
+            {unsigned code=0;
+                if(have_key){uint64_t x=key.hi^previous.hi;unsigned bases;
+                    if(x)bases=__builtin_clzll(x)/2;else{unsigned y=unsigned(key.lo^previous.lo)<<16;bases=y?32+__builtin_clz(y)/2:40;}
+                    code=bases<12?0:bases;}
+                piece->lcp[n]=uint8_t(code);previous=key;have_key=true;}
+            ++piece->count;feeds[j]->step();
+        }
+        close();
+        for(unsigned s=0;s<N;++s)if(out->rows[s]!=start(s,cut[r+1])-start(s,cut[r]))fail("joint pack range row accounting mismatch");
+        return out;
+    };
+    {
+        const size_t ranges=cut.size()-1,window=std::max<size_t>(2,2*size_t(encode_threads));std::deque<std::future<std::shared_ptr<RangeOutN>>>queue;size_t posted=0;
+        // Range jobs reference this frame: an early failure must still wait for the ones in flight.
+        struct Join{std::deque<std::future<std::shared_ptr<RangeOutN>>>&q;~Join(){GateRelease idle;for(auto&f:q)if(f.valid())f.wait();}}joined{queue};
+        auto post=[&]{while(posted<ranges&&queue.size()<window){size_t r=posted++;queue.push_back(spawn([&merge_range,r]{return merge_range(r);}));}};
+        std::shared_ptr<OrderPieceN>join; // the block that crosses range boundaries, assembled in order
+        auto put=[&](const Encoded&e,unsigned n){order.append(e,n);order.count+=n;};
+        post();
+        for(size_t r=0;r<ranges;++r){
+            auto out=get_helping(queue.front());queue.pop_front();post();
+            for(auto&d:out->dir){for(unsigned s=0;s<N;++s){d[s]+=rows[s];d[N+s]+=occ[s];}drows.push_back({d.begin(),d.begin()+N});docc.push_back({d.begin()+N,d.end()});}
+            for(unsigned s=0;s<N;++s){if(out->occ[s]>uint64_t(INT64_MAX)-occ[s])fail("joint frequency overflow");rows[s]+=out->rows[s];occ[s]+=out->occ[s];}
+            for(auto&item:out->items){
+                if(item.whole){if(join)fail("joint pack range join out of order");put(*item.whole,BLOCK);continue;}
+                auto&p=*item.part;
+                if(!join){if(p.offset)fail("joint pack range join out of order");join=item.part;}
+                else{if(join->block!=p.block||join->count!=p.offset)fail("joint pack range join out of order");
+                    std::copy_n(p.origin.begin()+p.offset,p.count,join->origin.begin()+p.offset);std::copy_n(p.lcp.begin()+p.offset,p.count,join->lcp.begin()+p.offset);
+                    for(unsigned s=0;s+1<N;++s)std::copy_n(p.weight[s].begin()+p.offset,p.count,join->weight[s].begin()+p.offset);join->count+=p.count;}
+                if(join->count==BLOCK){put(joint_order_encode_n(*join,N),BLOCK);join.reset();}
+            }
+        }
+        if(join)put(joint_order_encode_n(*join,N),join->count); // the last, partial block
+    }
+    drows.push_back(rows);docc.push_back(occ);phase("merge");
+    for(unsigned s=0;s<N;++s)if(occ[s]!=metas[s].marks)fail("joint full occurrence accounting mismatch: sample "+std::to_string(s)+" has "+std::to_string(occ[s])+" of "+std::to_string(metas[s].marks));
+    for(unsigned s=0;s<N;++s){auto partial=root/(joint_archive_name(s)+".partial");joint_compact_write(partial,*arch[s],true);}
+    phase("compact archives");
+    std::vector<Metadata>views;for(unsigned s=0;s<N;++s)views.push_back(arch[s]->m);
+    arch.clear();
+    for(unsigned s=0;s<N;++s){fs::remove(root/(names[s]+".gix"));fs::rename(root/(joint_archive_name(s)+".partial"),root/joint_archive_name(s));}
+    joint_finish_n(order,root,names,metas,std::move(views),cnt,drows,docc);phase("order metadata and views");
+    std::cout<<"{\"format_version\":4,\"order_codec\":3,\"samples\":"<<N<<",\"physical_rows\":"<<order.count<<",\"archive_rows\":[";for(unsigned s=0;s<N;++s)std::cout<<(s?",":"")<<rows[s];
+    std::cout<<"],\"sample_occurrences\":[";for(unsigned s=0;s<N;++s)std::cout<<(s?",":"")<<occ[s];std::cout<<"]}\n";
+}
 std::string joint_id(const char*h){std::string s(h);auto b=s.find_first_not_of(" \t");if(b==std::string::npos)fail("empty GDB sequence identifier");s=s.substr(b);return s.substr(0,s.find_first_of(" \t"));}
+// N samples: a view of any subset (construction order, comma separated) bound to its GDB; with more than one sample
+// selected the GDB scaffold identifiers are `sample|original`, as merge_fasta.py writes them.
+void joint_bind_view_n(const fs::path&root,const std::vector<std::string>&all,const std::string&samples,const fs::path&gdbpath,const fs::path&out){
+    const unsigned N=unsigned(all.size());std::vector<std::string>want;{std::stringstream ss(samples);std::string t;while(std::getline(ss,t,','))want.push_back(t);}
+    unsigned sel=0,last=0;bool first=true;
+    for(auto&w:want){auto it=std::find(all.begin(),all.end(),w);if(it==all.end())fail("--samples names an unknown sample: "+w);unsigned s=unsigned(it-all.begin());if(!first&&s<=last)fail("--samples must list samples in construction order");sel|=1u<<s;last=s;first=false;}
+    if(!sel)fail("--samples selects no sample");const bool merged=want.size()>1;
+    if(SourceKeys::database(out)!=fs::absolute(gdbpath)&&fs::weakly_canonical(SourceKeys::database(out))!=fs::weakly_canonical(gdbpath))fail("joint output descriptor must have the GDB stem and directory");
+    std::deque<View>views;for(unsigned s=0;s<N;++s)views.emplace_back(root/(all[s]+".gix"));
+    SourceKeys target(out);GDB db{};if(Read_GDB(&db,const_cast<char*>(gdbpath.c_str())))fail("read joint view GDB");
+    Metadata m;m.kmer=40;m.ibyte=3;m.freq=0;m.ncontig=db.ncontig;m.post=1;while(m.post<8&&(uint64_t(db.maxctg)>>(m.post*8)))++m.post;m.cont=1;while(m.cont<8&&(uint64_t(db.ncontig)>>(m.cont*8-1)))++m.cont;m.csize=m.post+m.cont+2;m.perm.resize(db.ncontig);std::iota(m.perm.begin(),m.perm.end(),0);std::stable_sort(m.perm.begin(),m.perm.end(),[&](int x,int y){return db.contigs[x].clen>db.contigs[y].clen;});m.index.resize(1u<<24);int64 prev=0;
+    for(size_t i=0;i<m.index.size();++i){uint64_t x=0;for(unsigned s=0;s<N;++s)if((sel>>s)&1){uint64_t y=views[s].m.index[i];if(y>uint64_t(INT64_MAX)-x)fail("joint merged row count overflow");x+=y;}m.index[i]=x;m.maxpre=std::max<int64_t>(m.maxpre,m.index[i]-prev);prev=m.index[i];}
+    std::vector<std::vector<int>>maps(N);std::vector<bool>used(db.ncontig);
+    for(unsigned s=0;s<N;++s){maps[s].assign(views[s].maps[s].size(),-1);if(!((sel>>s)&1))continue;auto sourcepath=root/(all[s]+".gix");SourceKeys source(sourcepath,&views[s].h);GDB old{};auto path=SourceKeys::database(sourcepath);if(Read_GDB(&old,const_cast<char*>(path.c_str())))fail("read original joint GDB");
+        for(int i=0;i<old.ncontig;++i){auto&c=old.contigs[i];auto id=(merged?all[s]+"|":"")+joint_id(old.headers+old.scaffolds[c.scaf].hoff);int found=-1;
+            for(int j=0;j<db.ncontig;++j){auto&t=db.contigs[j];if(!used[j]&&joint_id(db.headers+db.scaffolds[t.scaf].hoff)==id&&t.sbeg==c.sbeg&&t.clen==c.clen&&db.scaffolds[t.scaf].slen==old.scaffolds[c.scaf].slen){if(found>=0)fail("ambiguous joint view contig");found=j;}}
+            if(found<0)fail("missing joint view contig: "+id);auto&t=db.contigs[found];uint64_t bytes=uint64_t(c.clen)/4;if(memcmp(source.bps.data+c.boff,target.bps.data+t.boff,bytes))fail("joint view DNA differs: "+id);unsigned tail=c.clen%4;if(tail&&((source.bps.data[c.boff+bytes]^target.bps.data[t.boff+bytes])&((1u<<(2*tail))-1)))fail("joint view DNA tail differs: "+id);maps[s][i]=found;used[found]=true;}
+        Close_GDB(&old);
+    }
+    if(std::find(used.begin(),used.end(),false)!=used.end())fail("unselected/extra joint view contigs");Close_GDB(&db);joint_write_view_n(out,root,sel,m,maps);
+    std::cout<<"{\"status\":\"PASS\",\"format_version\":4,\"view_rows\":"<<m.index.back()<<",\"samples\":\""<<samples<<"\"}\n";
+}
 void joint_bind_view(const fs::path&root,const std::string&samples,const fs::path&gdbpath,const fs::path&out){
-    std::ifstream names(root/"joint.names");std::string an,bn;std::getline(names,an);std::getline(names,bn);if(an.empty()||bn.empty()||an==bn)fail("invalid joint sample names");unsigned sel=samples==an?1:samples==bn?2:samples==an+","+bn?3:0;if(!sel)fail("--samples must select reference, target, or reference,target in construction order");
+    std::ifstream names(root/"joint.names");std::string an,bn;std::getline(names,an);std::getline(names,bn);
+    {std::ifstream all_names(root/"joint.names");std::vector<std::string>all;std::string line;while(std::getline(all_names,line))if(!line.empty())all.push_back(line);
+     if(all.size()>2){joint_bind_view_n(root,all,samples,gdbpath,out);return;}}if(an.empty()||bn.empty()||an==bn)fail("invalid joint sample names");unsigned sel=samples==an?1:samples==bn?2:samples==an+","+bn?3:0;if(!sel)fail("--samples must select reference, target, or reference,target in construction order");
     if(SourceKeys::database(out)!=fs::absolute(gdbpath)&&fs::weakly_canonical(SourceKeys::database(out))!=fs::weakly_canonical(gdbpath))fail("joint output descriptor must have the GDB stem and directory");
     View av(root/(an+".gix")),bv(root/(bn+".gix"));SourceKeys target(out);GDB db{};if(Read_GDB(&db,const_cast<char*>(gdbpath.c_str())))fail("read joint view GDB");
     Metadata m;m.kmer=40;m.ibyte=3;m.freq=0;m.ncontig=db.ncontig;m.post=1;while(m.post<8&&(uint64_t(db.maxctg)>>(m.post*8)))++m.post;m.cont=1;while(m.cont<8&&(uint64_t(db.ncontig)>>(m.cont*8-1)))++m.cont;m.csize=m.post+m.cont+2;m.perm.resize(db.ncontig);std::iota(m.perm.begin(),m.perm.end(),0);std::stable_sort(m.perm.begin(),m.perm.end(),[&](int x,int y){return db.contigs[x].clen>db.contigs[y].clen;});m.index.resize(1u<<24);int64 prev=0;

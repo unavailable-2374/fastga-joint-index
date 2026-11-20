@@ -115,7 +115,9 @@ def main():
                 result=json.loads(run([tools/'GIXmake-shared','-T4','--backend',backend,'--scratch',scratch,
                                        '--input','ref-0='+str(inputs['A']),'--input','qry_1='+str(inputs['B']),
                                        '--input','extra='+str(inputs['A']),'--output',bundle]).stdout)
-                if result['storage']!='source' or len(result['inputs'])!=3:
+                # auto: three inputs make the N-sample joint bundle with the native backend; the pfp backend has no
+                # N-sample joint writer and keeps source storage
+                if result['storage']!=('joint' if backend=='native' else 'source') or len(result['inputs'])!=3:
                     raise RuntimeError('automatic storage selection for three inputs is incorrect')
                 verify('three-inputs-'+backend,bundle)
                 checked=json.loads(run([tools/'gixshare','verify-equivalent',native['A'],bundle/'extra.gix']).stdout)
@@ -165,7 +167,7 @@ def main():
             if (expected/'build.json').read_bytes()!=before:raise RuntimeError('existing output was modified')
             errors=[(['--storage','invalid'],'storage must be'),(['--backend','invalid'],'backend must be'),
                     (['--backend','pfp','-T1'],'PFP sorting requires at least two threads'),
-                    (['--storage','joint'],'joint storage needs exactly two samples'),
+                    (['--storage','joint'],'joint storage needs at least two samples'),
                     (['--input','B='+str(inputs['B']),'--storage','joint','--reference','unknown'],'unknown sample'),
                     (['--storage','source','--reference','A'],'--reference is only used'),
                     (['--implicit-mask','unknown'],'unknown sample'),

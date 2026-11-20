@@ -122,6 +122,15 @@ FastGA-shared -T24 -pafx indexes/joint/A.gix indexes/joint/B.gix > A-to-B.paf
 FastGA-shared -T24 -pafx indexes/joint/B.gix indexes/joint/A.gix > B-to-A.paf
 ```
 
+Three to 64 inputs build one N-sample joint bundle; any two of its views align as above:
+
+```sh
+GIXmake-shared --threads 24 \
+  --input A=genome-A.fa --input B=genome-B.fa --input C=genome-C.fa \
+  --output indexes/joint3
+FastGA-shared -T24 -pafx indexes/joint3/A.gix indexes/joint3/C.gix > A-to-C.paf
+```
+
 Create the parent output directory first (`mkdir -p indexes`). `--threads` is a
 total construction budget, including the merge consumer, and must be 1–32.
 Native sorting uses sequential raw seed spools when the budget cannot run all
@@ -135,8 +144,10 @@ minimizer-anchor finder; only the pfp backend parses with PFP. Existing v1/v2/v3
 the same build. The non-joint storage modes remain available for comparisons.
 
 `GIXmake-shared --help` lists all parameters. Its default `--storage auto` chooses
-joint v4 for two inputs and source v3 otherwise; the first input is the default
-joint reference. Explicit `legacy`, `positions`, `source` and `joint` modes are
+joint v4 for two or more inputs (two with `--backend pfp`) and source v3 otherwise;
+the first input is the default joint reference. With three or more inputs each
+input copies from all earlier ones, so list the most complete assembly first;
+`--copy-index-mib` caps the copy finder's memory (see [format](docs/format.md)). Explicit `legacy`, `positions`, `source` and `joint` modes are
 available with either backend. Existing output and log directories are rejected.
 
 Lowercase masks can be stored with `--implicit-mask A` / `--implicit-mask B`;

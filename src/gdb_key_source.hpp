@@ -17,15 +17,23 @@ inline uint32_t file_crc(const unsigned char *data,uint64_t size){
     uLong total=sums[0];for(unsigned i=1;i<parts;++i)total=crc32_combine(total,sums[i],lens[i]);
     return total;
 }
+// A GDB source file in memory. resident: read into huge pages (the packed bases, which every key check reads at a
+// random place) instead of mapped from the page cache.
 struct SourceMap {
-    File file;const unsigned char *data=nullptr;uint32_t checksum=0;
-    explicit SourceMap(const fs::path &path):file(path){
+    File file;const unsigned char *data=nullptr;uint32_t checksum=0;bool resident=false;
+    explicit SourceMap(const fs::path &path,bool in_memory=false):file(path),resident(in_memory){
         if(!file.size||file.size>SIZE_MAX)fail("invalid GDB source size: "+path.string());
-        auto p=mmap(nullptr,file.size,PROT_READ,MAP_PRIVATE,file.fd,0);
-        if(p==MAP_FAILED)fail("map GDB source: "+path.string());data=static_cast<const unsigned char*>(p);
+        if(resident){
+            auto*p=static_cast<unsigned char*>(jc::huge_map(file.size));data=p;
+            for(uint64_t at=0;at<file.size;){auto got=pread(file.fd,p+at,std::min<uint64_t>(file.size-at,uint64_t(1)<<30),off_t(at));
+                if(got<=0)fail("read GDB source: "+path.string());at+=uint64_t(got);}
+        }else{
+            auto p=mmap(nullptr,file.size,PROT_READ,MAP_PRIVATE,file.fd,0);
+            if(p==MAP_FAILED)fail("map GDB source: "+path.string());data=static_cast<const unsigned char*>(p);
+        }
         checksum=file_crc(data,file.size);
     }
-    ~SourceMap(){if(data)munmap(const_cast<unsigned char*>(data),file.size);}
+    ~SourceMap(){if(!data)return;if(resident)jc::huge_unmap(const_cast<unsigned char*>(data),file.size);else munmap(const_cast<unsigned char*>(data),file.size);}
     SourceMap(const SourceMap&)=delete;
 };
 struct SourceKeys {
@@ -35,7 +43,7 @@ struct SourceKeys {
         path.replace_extension(".gdb");return path;
     }
     explicit SourceKeys(const fs::path &sample,const Bytes *expected=nullptr)
-      :gdbpath(database(sample)),gdb(gdbpath),bps(sample.parent_path()/("."+sample.stem().string()+".bps")){
+      :gdbpath(database(sample)),gdb(gdbpath),bps(sample.parent_path()/("."+sample.stem().string()+".bps"),true){
         if(gdb.file.size>UINT32_MAX)fail("GDB metadata exceeds source format size limit");
         if(expected)verify(*expected); // Check identity before parsing metadata.
         // Upstream Read_GDB keeps static state, so concurrent constructions take turns.

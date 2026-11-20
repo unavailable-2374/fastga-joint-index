@@ -9,6 +9,7 @@
 #include <mutex>
 #include <thread>
 #include <sched.h>
+#include <sys/mman.h>
 #include "sxgc_gate.h"
 #include <numeric>
 #include <queue>
@@ -187,20 +188,35 @@ struct Intervals {
 // bucket. A segment covered by exactly one copy carries that copy's translation inline (its ID, the constant of the
 // affine map reference start -> target start, target contig and orientation), so the common translation costs one
 // random memory access; segments with several copies list their IDs and translate through a 16-byte per-copy table.
-// Tables are cache-line aligned. (Huge-page advice was tried and removed: with THP defrag=madvise the page faults stall.)
 struct Span {
     const uint32_t*data=nullptr;uint32_t size=0;
     uint32_t operator[](size_t i)const{return data[i];}
 };
-template<class T> struct HugeAlloc { // 64-byte aligned (cache-line) storage for the random-access lookup tables
+// Storage for the random-access lookup tables: 64-byte aligned (cache line); from 4 MiB on, whole 2 MiB pages of an
+// anonymous mapping marked for transparent huge pages, since a random lookup into gigabytes of 4 KiB pages pays a
+// page walk (that misses the cache itself) on top of the data miss.
+inline void*huge_map(size_t bytes){
+    const size_t page=size_t(2)<<20,rounded=(bytes+page-1)/page*page;
+    void*p=mmap(nullptr,rounded+page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    if(p==MAP_FAILED)throw std::bad_alloc();
+    auto*b=static_cast<char*>(p),*a=reinterpret_cast<char*>((reinterpret_cast<uintptr_t>(b)+page-1)/page*page);
+    if(a>b)munmap(b,size_t(a-b));
+    if(size_t(a-b)<page)munmap(a+rounded,page-size_t(a-b));
+    madvise(a,rounded,MADV_HUGEPAGE); // advice only: without huge pages the mapping still works
+    return a;
+}
+inline void huge_unmap(void*p,size_t bytes){const size_t page=size_t(2)<<20;munmap(p,(bytes+page-1)/page*page);}
+constexpr size_t HUGE_MIN=size_t(4)<<20;
+template<class T> struct HugeAlloc {
     using value_type=T;HugeAlloc()=default;template<class U> HugeAlloc(const HugeAlloc<U>&){}
     T*allocate(size_t n){
-        const size_t rounded=(n*sizeof(T)+63)/64*64;void*p=nullptr;
         if(!n)return nullptr;
+        if(n*sizeof(T)>=HUGE_MIN)return static_cast<T*>(huge_map(n*sizeof(T)));
+        const size_t rounded=(n*sizeof(T)+63)/64*64;void*p=nullptr;
         if(posix_memalign(&p,64,rounded))throw std::bad_alloc();
         return static_cast<T*>(p);
     }
-    void deallocate(T*p,size_t){free(p);}
+    void deallocate(T*p,size_t n){if(n*sizeof(T)>=HUGE_MIN)huge_unmap(p,n*sizeof(T));else free(p);}
     template<class U> bool operator==(const HugeAlloc<U>&)const{return true;}
     template<class U> bool operator!=(const HugeAlloc<U>&)const{return false;}
 };
@@ -216,7 +232,9 @@ struct Stab {
     // bucket b are bucket[b]..bucket[b+1]-1 and the one covering the bucket's first position starts earlier. off[s] is
     // the offset of segment s's start inside its bucket (16 bits): finding a position's segment reads one cache line
     // of offsets, counts those not above the position, and touches the 32-byte segment record last.
-    struct Contig {HugeVector<Seg> seg;HugeVector<uint32_t> ids,bucket;HugeVector<uint16_t> off;uint64_t last=0;};
+    // live: one bit per bucket, set when a segment with copies (n>0) overlaps it; live_hi: one bit per live word, set
+    // when the word has a bit. Copies cover little of a genome, so most positions are answered from these few cache lines.
+    struct Contig {HugeVector<Seg> seg;HugeVector<uint32_t> ids,bucket;HugeVector<uint16_t> off;std::vector<uint64_t> live,live_hi;uint64_t last=0;};
     std::vector<Contig> contigs;HugeVector<XCopy> xc;
     static XCopy translation(const Copy&c){
         if(c.n>=(uint64_t(1)<<31)||c.b>=(uint32_t(1)<<31))pm::fail("joint copy too large for the reader index");
@@ -270,9 +288,22 @@ struct Stab {
         size_t s=0;
         for(size_t b=0;b<nb;++b){while(s<ns&&(o.seg[s].bp>>kShift)<b)++s;o.bucket[b]=uint32_t(s);}
         for(size_t t=0;t<ns;++t)o.off[t]=uint16_t(o.seg[t].bp&((uint64_t(1)<<kShift)-1));
+        o.live.assign((nb+63)/64,0);o.live_hi.assign((o.live.size()+63)/64,0);
+        for(size_t t=0;t+1<ns;++t)if(o.seg[t].n)for(uint64_t b=o.seg[t].bp>>kShift,e=(o.seg[t+1].bp-1)>>kShift;b<=e;++b)o.live[b>>6]|=uint64_t(1)<<(b&63);
+        for(size_t w=0;w<o.live.size();++w)if(o.live[w])o.live_hi[w>>6]|=uint64_t(1)<<(w&63);
     }
     bool covered(size_t c,uint64_t x)const{
         if(c>=contigs.size())return false;auto&o=contigs[c];return o.seg.size()>=2&&x>=o.seg.front().bp&&x<o.last;
+    }
+    // False only when no copy covers x (covered(c,x) is false or x's segment has n==0); true leaves it to segment().
+    bool live(size_t c,uint64_t x)const{
+        if(!covered(c,x))return false;auto&o=contigs[c];const uint64_t b=x>>kShift;
+        return (o.live_hi[b>>12]>>((b>>6)&63)&1)&&(o.live[b>>6]>>(b&63)&1);
+    }
+    // Number of copies covering x: segment(c,x)->n, or 0 when there is no segment.
+    uint32_t count(size_t c,uint64_t x)const{
+        if(c>=contigs.size())pm::fail("joint source contig outside map");
+        return live(c,x)?segment_at(c,index(c,x))->n:0;
     }
     void prefetch_bucket(size_t c,uint64_t x)const{if(covered(c,x))__builtin_prefetch(&contigs[c].bucket[x>>kShift],0,1);}
     // Second stage (the bucket line has arrived): the offsets of the segments starting in the bucket.
