@@ -55,9 +55,6 @@ FastGA-shared -T24 -pafx A.fa > A.paf
 合并视图计时包含新建 GDB，复用原生索引时未实测的构建时间标为空；旧实验不补造计时数据。
 仅比较构建可使用 `--construction-only`：完成全部构建正确性检查后报告 `MEASURED`，
 如实保留联合索引更大的结果，不宣称已通过空间或速度验收。
-CMake 迁移验证见 [构建与计时检查](benchmarks/cmake-build-verification.json)。
-当前读入器的块缓存复用、批量恢复和位图查找见 [实现说明](docs/reader-optimization.md)，
-完整模拟数据及 sanitizer 结果见 [读入器正确性记录](benchmarks/reader-implementation-verification.json)。
 
 以上直接读取你的 FASTA：两个输入自动构建 v4 联合索引并比对；一个输入构建
 v3 独立压缩索引并自比对，也支持 `.fna`、`.fasta` 及其 gzip 文件。
@@ -180,35 +177,8 @@ FastGA-shared -T24 -pafx merged.gix > self.paf
 
 后面的单倍型有 91–95% 的出现位置是继承来的。作为对照，一个人类单倍型的上游索引约 31 GiB（见上面的 HG002/HG005）。
 
-更早的测量（*Macaca nemestrina* 单倍型对比、原实现的 HAP 与 HG002/HG005 检查、读入器对照）见
-[基准详情](docs/benchmarks.md)。
-
-## 原实现的历史结果
-
-这些数据来自独立整理前的原实现；公共 GDB 序列空间单独统计。
-
-| 完整输入 | 原生两份索引 | 独立 v3 两份索引 | 联合索引，含三个视图 |
-|---|---:|---:|---:|
-| FastGA 上游 HAP 示例 | 1.955 GB | 0.632 GB | 0.500 GB |
-| 人类 HG002 + HG005 | 65.704 GB | 23.121 GB | 11.779 GB |
-
-人类联合索引完成了全量记录核验，合并视图包含 **4,362,338,887** 条逻辑记录。
-两个方向的首轮完整种子与 PAF/CIGAR 相同。人类比对已按用户要求停止：
-**尚未完成四轮速度比较，也没有完整人类合并自比对结果。**
-
-完整 HAP 示例的双向和自比对验收均通过，四轮耗时中位数分别为 v3 的
-1.178、1.145、1.053 倍。该测量使用 12 逻辑 CPU 的 macOS 主机、`-T24` 和
-未控制的 OS 缓存；HAP 示例结果不能当作人类基因组速度结果。
-
-2026-10-29 又对完整 HAP 做了**同一份联合 v4 索引的旧、新读入器对照**：四轮总耗时中位数
-在 A→B、B→A、合并自比对上分别缩短 **7.4%、4.5%、6.5%**，全量记录、种子与排序后
-PAF/CIGAR 一致，索引文件哈希未改变。环境为 Apple M2 Pro、12 逻辑核、16 GiB、`-T24`，
-OS 缓存未控制；同轮配对比值的中位数对应缩短 7.1%、4.3%、4.6%，自比对存在单轮变慢，
-所有轮次均保留。详见 [阶段耗时、内存及敏感性记录](docs/reader-optimization.md#complete-hap-reader-comparison-2026-10-29)
-和 [原始计时摘要](benchmarks/reader-hap.json)。这组结果比较两个联合索引读入器版本。
-
-[结果摘要](benchmarks/) 保留真实数字及来源摘要校验和，不包含个人机器路径、
-SSH 信息、基因组 FASTA、索引大文件或二进制程序。所有生成的小数据都明确标记
+[`benchmarks/current/`](benchmarks/current/) 保存上面各表的数据，不包含个人机器路径、
+基因组 FASTA、索引大文件或二进制程序。所有生成的小数据都明确标记
 为 **SIMULATED TEST DATA**，仅用于正确性测试。
 
 方法和文件格式见 [方法说明](docs/method.md)、[格式说明](docs/format.md)，

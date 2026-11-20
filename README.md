@@ -265,10 +265,6 @@ paternal and maternal
 Later haplotypes inherit 91–95% of their occurrences. For comparison, one upstream
 human haplotype index is about 31 GiB (HG002/HG005 pair above).
 
-Earlier measurements (the *Macaca nemestrina* pair, the original integration's
-HAP and HG002/HG005 checks, reader comparisons) are kept in
-[benchmark details](docs/benchmarks.md).
-
 ## Reproduce a complete comparison
 
 ```sh
@@ -312,11 +308,6 @@ ctest --test-dir build-sanitized -R 'codec|fasta-entry-point|native-index-cli|sa
 This optional sanitizer configuration instruments the C++ entry point/builder,
 FastGA driver/adapter, packer, provenance writer and codec test. Linked upstream support objects are not instrumented;
 leak detection is disabled. It does not certify the entire upstream program.
-The previous C++ migration snapshot is in [unified indexing verification](benchmarks/unified-index-verification.json).
-Build-system migration checks are in [CMake build and timing verification](benchmarks/cmake-build-verification.json).
-Current reader correctness checks are in [reader implementation verification](benchmarks/reader-implementation-verification.json);
-the [reader implementation notes](docs/reader-optimization.md) describe block reuse,
-batched restoration and bitmap rank/select.
 
 | Directory | Contents |
 |---|---|
@@ -325,8 +316,8 @@ batched restoration and bitmap rank/select.
 | `scripts/` | Complete-input benchmarks, validation and FASTA preparation |
 | `tests/` | Explicitly labelled simulated correctness fixtures |
 | `vendor/`, `patches/` | Pinned upstream sources and reviewable modifications |
-| `docs/` | Method, binary format, reproducibility and measured results; `docs/figures/` holds the result figures |
-| `benchmarks/` | Real result summaries without private machine paths; `benchmarks/current/` holds the tables above |
+| `docs/` | Method, binary format, command line, upstream changes, reproducibility; `docs/figures/` holds the result figures |
+| `benchmarks/current/` | Tables, sample accessions and the six-haplotype summary behind the measured results |
 
 Read the [method](docs/method.md), [v4 format](docs/format.md), and
 [upstream changes](docs/upstream.md). Third-party license texts are retained;

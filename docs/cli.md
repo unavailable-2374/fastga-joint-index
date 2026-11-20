@@ -100,8 +100,8 @@ contains the native `FastGA-shared` entry point, `FastGA-shared-core`, helper
 programs and `pfp-tools/`; move them together. Earlier Python-entry-point caches
 remain untouched; the native constructor uses a new cache identity/schema.
 
-The first call includes index construction and alignment. Historical benchmark
-alignment-only times must not be compared with this combined wall time.
+The first call includes index construction and alignment, so its wall time is not
+comparable with alignment-only times.
 
 ## Masking and alignment options
 

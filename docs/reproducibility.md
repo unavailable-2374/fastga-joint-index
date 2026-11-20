@@ -53,8 +53,7 @@ outside elapsed command time. Cache is uncontrolled; medians are descriptive.
 unobserved construction times and native ratios are null, never zero. Default
 fresh builds provide all comparisons. A single `--build-passes 1` is explicitly
 one observation. `--simulated-test` labels all reports and resumed workloads
-**SIMULATED TEST DATA**. Historical reports lacking this timing schema have no
-new construction-time claim; reader adoption preserves original producer times.
+**SIMULATED TEST DATA**.
 
 The first complete PAF is fully parsed, including all CIGAR spans and input
 coordinates. Later complete sorted bytes are compared to it. Their record
@@ -91,8 +90,6 @@ python3 scripts/benchmark.py --resume-build results/checkpoint \
   --workload BA --threads 24 --output results/BA
 python3 scripts/benchmark.py --resume-build results/checkpoint \
   --workload self --threads 24 --output results/self
-python3 scripts/finalize_benchmark.py --build results/checkpoint \
-  --workloads results/AB results/BA results/self
 ```
 
 Each workload performs one native and one joint alignment (plus an optional
@@ -100,17 +97,7 @@ untimed `--seed-audit` control pass). Use separate, comparable allocations for
 parallel workloads. Do not compile, compress source archives or run unrelated
 CPU-intensive work on a timing allocation.
 
-`scripts/adopt_build.py` can revalidate an existing
-physical index using a newer reader: it preserves original producer evidence,
-checks immutable inputs and sizes, and repeats all six full record controls.
-New-reader seed/PAF controls and timings must still execute.
-
-`scripts/repeat_round.py` replaces an explicitly documented, confounded paired
-round. It requires the same host/allocation and binaries, retains excluded
-observations and reruns all three backends. A slow result alone is not a reason
-to exclude a round. The replacement outputs are byte-compared in full.
-
-Finalization requires every workload's full equality and speed gates. If a
+Every workload must pass its full equality controls. If a
 program fails, stop dependent stages, retain its exact error and resolve the
 cause. Do not replace failed outputs with generated data or weaken the equality
 comparison. Indexes, GDBs and BPS files must remain immutable during reads.
@@ -143,7 +130,7 @@ python3 scripts/benchmark_reader.py --build results/checkpoint \
 
 The construction checkpoint must retain the original frozen producer toolchain.
 Use a new output directory. Synthetic input requires an explicit SIMULATED
-label; historical biological reports are not rewritten. A CPU sampler such as
+label. A CPU sampler such as
 macOS `sample` is run separately from the clean timing rounds; a sampled run's
 wall time is not a clean speed measurement, and inlining changes symbol counts.
 

@@ -264,11 +264,6 @@ Many different pairs are run once each instead of repeating timing rounds.
 Complete PAFs are sorted with `LC_ALL=C` and byte-compared; the first one is fully
 parsed, including all CIGAR spans. `--seed-audit` adds an untimed full seed-pair
 control pass. Speed (joint/native wall ratio, limit 1.2) is recorded, not enforced.
-`scripts/adopt_build.py --build OLD --bin NEW_BIN --output NEW_CHECKPOINT` supports
-reader-only upgrades: it keeps the original producer report, checks input hashes
-and all index sizes, then reruns all six full decoded-record controls with the
-new frozen reader. It publishes only `BUILT`. Full seed/PAF controls and timings
-must run again; producer-owned artifacts remain in their original directory.
 All persistent companions and view descriptors count toward index size; common
 GDB bytes and minimal merged-view storage are reported separately. Scratch peaks
 are sampled, with interval and scope recorded; they are not exact instantaneous
@@ -278,11 +273,3 @@ HPC operation separates verified build checkpoints (`BUILT`, not alignment PASS)
 from independent AB, BA and self workloads. Each workload pins 24 available CPU
 IDs on Linux, retains the same allocation for all backends, performs full seed
 validation and four timed rounds, and fails if median joint/v3 time exceeds 1.2.
-Final acceptance requires all three workloads plus the space gate. No complete
-human alignment claim is made until those workload reports actually pass.
-
-A known timing interference requires retaining the original observations and
-replacing the entire paired backend round on the same host/allocation.
-`scripts/repeat_round.py` checks frozen executable hashes and the validated native
-PAF, byte-compares every replacement output, and records the excluded round and
-reason. The accepted HAP self run includes one such documented replacement.
