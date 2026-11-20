@@ -1,0 +1,19 @@
+group	id	accession	organism
+pair1	A	GCA_045364795.1	Willisornis vidua
+pair1	B	GCA_964188405.1	Protomyctophum parallelum
+pair2	A	GCA_965113315.1	Podarcis vaucheri
+pair2	B	GCF_929443795.1	Astur gentilis
+pair3	A	GCA_039655065.1	Glossophaga mutica
+pair3	B	GCA_039720435.1	Amazona ochrocephala
+pair4	A	GCF_007364275.1	Archocentrus centrarchus
+pair4	B	GCA_963455305.1	Plecotus auritus
+pair5	A	GCF_028858725.1	Colius striatus
+pair5	B	GCF_011004845.1	Esox lucius
+merge	M1	GCA_043748575.1	Rhinolophus perniger lanosus
+merge	M2	GCF_040894005.1	Engystomops pustulosus
+merge	M3	GCF_029633865.1	Lampris incognitus
+merge	M4	GCA_028020825.1	Podargus strigoides
+merge	M5	GCF_023053635.1	Elgaria multicarinata webbii
+merge	M6	GCA_949357685.1	Gobio gobio
+pair6	A	HG002.paternal.f1_v2	Homo sapiens (HG002)
+pair6	B	HG005.paternal.f1_v2	Homo sapiens (HG005)

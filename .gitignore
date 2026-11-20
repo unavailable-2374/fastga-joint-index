@@ -31,9 +31,11 @@ __pycache__/
 *.partial
 joint.order
 joint.copies
+joint.*.copies
 joint.names
 reference.meta
 target.meta
+target.*.meta
 READY
 build.json
 *.zip

@@ -1,0 +1,19 @@
+pair	A	B	tool	build_s	align_s	total_s	build_rss	align_rss	peak_rss	index_gib	n_align
+pair1	Willisornis vidua	Protomyctophum parallelum	native	44.210	38.615	82.825	1.375	2.953	2.953	25.838	2
+pair1	Willisornis vidua	Protomyctophum parallelum	v5nm	44.210	25.565	69.775	1.375	3.287	3.287	25.838	2
+pair1	Willisornis vidua	Protomyctophum parallelum	v5m	93.660	28.685	122.345	5.871	3.812	5.871	8.408	2
+pair2	Podarcis vaucheri	Astur gentilis	native	58.780	30.455	89.235	1.545	4.668	4.668	31.404	2
+pair2	Podarcis vaucheri	Astur gentilis	v5nm	58.780	26.450	85.230	1.545	4.201	4.201	31.404	2
+pair2	Podarcis vaucheri	Astur gentilis	v5m	153.720	29.915	183.635	7.347	4.779	7.347	10.241	2
+pair3	Glossophaga mutica	Amazona ochrocephala	native	69.200	41.220	110.420	1.795	11.013	11.013	37.702	2
+pair3	Glossophaga mutica	Amazona ochrocephala	v5nm	69.200	25.590	94.790	1.795	8.655	8.655	37.702	2
+pair3	Glossophaga mutica	Amazona ochrocephala	v5m	134.620	37.415	172.035	9.242	8.837	9.242	12.138	2
+pair4	Archocentrus centrarchus	Plecotus auritus	native	58.200	23.495	81.695	1.814	2.371	2.371	31.022	2
+pair4	Archocentrus centrarchus	Plecotus auritus	v5nm	58.200	23.655	81.855	1.814	2.357	2.357	31.022	2
+pair4	Archocentrus centrarchus	Plecotus auritus	v5m	121.940	32.875	154.815	6.736	3.336	6.736	10.661	2
+pair5	Colius striatus	Esox lucius	native	51.950	30.315	82.265	1.367	6.089	6.089	22.777	2
+pair5	Colius striatus	Esox lucius	v5nm	51.950	24.590	76.540	1.367	4.556	4.556	22.777	2
+pair5	Colius striatus	Esox lucius	v5m	91.730	25.040	116.770	5.262	4.724	5.262	7.153	2
+pair6	Homo sapiens (HG002)	Homo sapiens (HG005)	native	114.550	5426.000	5540.550	2.262	11.640	11.640	62.564	2
+pair6	Homo sapiens (HG002)	Homo sapiens (HG005)	v5nm	114.550	997.090	1111.640	2.262	8.647	8.647	62.564	2
+pair6	Homo sapiens (HG002)	Homo sapiens (HG005)	v5m	274.740	1125.020	1399.760	14.279	9.083	14.279	11.467	2

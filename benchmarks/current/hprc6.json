@@ -1,0 +1,110 @@
+{
+  "kind": "REAL complete-input measurement",
+  "inputs": "HPRC Year 1 f1 assembly v2 GenBank FASTA, paternal (P) and maternal (M) haplotypes of HG002, HG005, HG00438; storage order HG002P, HG002M, HG005P, HG005M, HG00438P, HG00438M",
+  "commit": "d4efe6a (built from the uncommitted working tree just before that commit; the only later source changes are the 64-sample limit check and the ALNtoPSL patch, neither on this path)",
+  "host": "shared Linux host, 256 logical CPUs; GIXmake-shared -T24 and FastGA-shared -T24 each pinned to 24 CPUs",
+  "build": {
+    "wall_seconds": 683.18,
+    "peak_rss_kib": 25461884,
+    "index_bytes": 15660789692,
+    "physical_rows": 2908024513,
+    "sample_occurrences": {
+      "HG002P": 2189138015,
+      "HG002M": 2263530344,
+      "HG005P": 2173200872,
+      "HG005M": 2239559897,
+      "HG00438P": 2235992282,
+      "HG00438M": 2243625486
+    },
+    "archive_rows": {
+      "HG002P": 2189138015,
+      "HG002M": 205836746,
+      "HG005P": 112900864,
+      "HG005M": 132497683,
+      "HG00438P": 134241178,
+      "HG00438M": 133410027
+    },
+    "copies": [
+      {
+        "sample": "HG002M",
+        "copied_bases": 2924229713,
+        "inherited_occurrences": 2057693598,
+        "residual_occurrences": 205836746,
+        "target_occurrences": 2263530344,
+        "by_source": [
+          3551916
+        ]
+      },
+      {
+        "sample": "HG005P",
+        "copied_bases": 2926658000,
+        "inherited_occurrences": 2060300008,
+        "residual_occurrences": 112900864,
+        "target_occurrences": 2173200872,
+        "by_source": [
+          3465120,
+          26028
+        ]
+      },
+      {
+        "sample": "HG005M",
+        "copied_bases": 3016113070,
+        "inherited_occurrences": 2107062214,
+        "residual_occurrences": 132497683,
+        "target_occurrences": 2239559897,
+        "by_source": [
+          3829154,
+          265256,
+          12990
+        ]
+      },
+      {
+        "sample": "HG00438P",
+        "copied_bases": 3011242697,
+        "inherited_occurrences": 2101751104,
+        "residual_occurrences": 134241178,
+        "target_occurrences": 2235992282,
+        "by_source": [
+          3879991,
+          257765,
+          11568,
+          11372
+        ]
+      },
+      {
+        "sample": "HG00438M",
+        "copied_bases": 3022370661,
+        "inherited_occurrences": 2110215459,
+        "residual_occurrences": 133410027,
+        "target_occurrences": 2243625486,
+        "by_source": [
+          3863360,
+          254469,
+          13460,
+          9855,
+          9952
+        ]
+      }
+    ]
+  },
+  "verify_equivalent": {
+    "tool": "gixshare verify-equivalent against upstream GIXmake -k40 on the same GDB",
+    "status": "PASS for all six samples",
+    "exact_rows_verified": {
+      "HG002P": 2189138015,
+      "HG002M": 2263530344,
+      "HG005P": 2173200872,
+      "HG005M": 2239559897,
+      "HG00438P": 2235992282,
+      "HG00438M": 2243625486
+    }
+  },
+  "alignment": {
+    "command": "FastGA-shared -T24 -pafx -f10 -c85 -s1000 -l100 -i0.7 HG002P.gix HG005P.gix",
+    "wall_seconds": 1156.63,
+    "peak_rss_kib": 9881248,
+    "records": 492284,
+    "sorted_paf_sha256": "a9af1c9a68de98347c9b40bd5737a392d7d3a2879f404cdd7838d80428428779",
+    "identical_to_upstream_fastga": true
+  }
+}

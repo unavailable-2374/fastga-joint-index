@@ -2,12 +2,16 @@
 
 The storage contract is the complete, corrected native FastGA seed stream:
 keys, masks, strands, contigs, positions and multiplicities. Sampling and
-alignment sensitivity are preserved. The implementation currently requires
-two named inputs, an explicit reference and k=40.
+alignment sensitivity are preserved. The implementation takes 2–64 named inputs
+and k=40. The first input (or `--reference`) is stored in full; every later input
+copies from all earlier ones, so input order affects compression but not results.
 
 1. Construct GDB sequence storage and collect native selected-position bitmaps
    for both strands, with the oriented marked texts.
-2. Index the reference's minimizers (both strands). Look up the target's
+2. Index the reference's minimizers (both strands). With three or more inputs,
+   the reference of input i is a pseudo reference: every contig of input 0 plus
+   every stretch of at least 40 bp of inputs 1..i-1 not covered by their own
+   copies, so each copy resolves to a stored occurrence in one step. Look up the target's
    minimizers, reject hits whose stored 16-base flank signatures show that no
    exact run through them can reach 40 bases (a conservative filter: the selected
    copies are unchanged), extend each remaining hit to the maximal exact run with DNA comparisons,
@@ -48,7 +52,7 @@ coordinates across copies. Packed 40-mer reconstruction and LCP calculations use
 word operations. The row lookaside cache remains bounded. These changes preserve
 the on-disk format and seed selection.
 
-Copy candidates are phrase based, so this is not a globally optimal relative
-parse. Similarity, contig structure, boundaries and reference choice affect
+Copy candidates come from minimizer anchors, so this is not a globally optimal
+relative parse. Similarity, contig structure, boundaries and reference choice affect
 compression. No universal space saving or speedup is promised for unrelated
 genomes. Full-input comparisons and their acceptance gates remain necessary.

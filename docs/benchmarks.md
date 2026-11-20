@@ -1,5 +1,48 @@
 # Real observations and verification scope
 
+## Current results
+
+The current measurements (six genome pairs, merged genomes of N=3–6, six human
+haplotypes in one bundle; commit `d4efe6a`) are reported in the
+[README](../README.md#measured-results), with their tables in
+[`benchmarks/current/`](../benchmarks/current/) and figures in
+[`figures/`](figures/). The sections below are earlier measurements, each with
+the version it measured; their numbers are kept unchanged.
+
+## Macaque pair, minimizer-anchor finder (2026-11-05)
+
+Real measurements on the complete *Macaca nemestrina* haplotype pair
+(PR00030, hap1 as reference, hap2 as query), `-T24 -pafx`, one shared Linux host
+with 256 logical CPUs. Original FastGA is the unmodified upstream build
+(`FastGA-baseline`); the second column is `FastGA-shared` as of 2026-11-05
+(commits `b59584f`/`48c6b3c`), the first version with the minimizer-anchor copy finder, before the
+alignment-engine and thread-budget changes behind the [current results](#current-results).
+
+| Measure | Original FastGA | FastGA-shared | Difference |
+|---|---:|---:|---:|
+| PAF output | 540,544 lines, 14,770,377,539 B | byte-identical (`cmp`), both runs | none |
+| Index files, GDB sequence excluded | 64,450,238,138 B (`.gix` + `.ktab.*`, both genomes) | 13,034,351,452 B (all joint index files) | 20.2% of original, 4.94× smaller |
+| End-to-end wall time (index + alignment) | 2,149 s | 2,286 s; 2,332 s | +6.3%; +8.5% |
+| End-to-end CPU (user + system) | 9,029 core-s (420% CPU) | 18,186; 19,165 core-s | 2.01×; 2.12× |
+| End-to-end peak RSS | 19,210,152 KiB (18.32 GiB) | 19,739,836; 19,702,008 KiB (18.83; 18.79 GiB) | +2.8%; +2.6% |
+
+The GDB sequence files (`.bps`, 1,543,856,064 B for both genomes) are identical
+in both setups and are excluded from the index sizes.
+
+For that version alone:
+- Index construction takes 584 s.
+- The copy finder takes 94 s and the merge 445 s.
+- Peak RSS of a standalone index build is 15,515,908 KiB (14.80 GiB), so the end-to-end peak occurs during alignment.
+- Exact copies cover 97.60% of query bases, leaving 395.1 million residual index rows.
+
+Caveats:
+- Every row is a single run, and the host was shared. Load averages were 85–200 during the original run and 65–161 during the two FastGA-shared runs.
+- The wall-time gap is therefore approximate.
+- The original run used only 420% CPU, so much of the extra CPU of FastGA-shared ran on otherwise idle cores.
+- Original FastGA index construction was not timed separately from alignment.
+
+## Original integration
+
 `benchmarks/hap.json` and `benchmarks/human.json` retain actual observations from
 the original integration before standalone extraction. Their numeric results
 and hashes are unchanged. Later reader comparisons and standalone build tests
@@ -16,7 +59,7 @@ rounds by default. The historical HAP/human runs did not collect that
 matched construction-time comparison; their missing medians are not inferred
 from conversion times or alignment logs. See [the timing scope](reproducibility.md).
 
-## Complete human assemblies
+### Complete human assemblies
 
 Inputs: complete HPRC Year 1 HG002 and HG005 paternal f1 assembly v2 GenBank
 FASTA files. Public source URLs and published checksums are retained in
@@ -42,7 +85,7 @@ native baseline. **Human experiments were stopped by user request.** The merged
 native self run and the four-round timing study were not completed. Individual
 correctness-run timings include seed auditing and are not final speed medians.
 
-## Complete upstream HAP examples
+### Complete upstream HAP examples
 
 The full example inputs contain 172,998,213 bases. Their names do not establish
 human biological provenance; these are not the human measurements above.
@@ -69,7 +112,7 @@ not a universal runtime guarantee. A known source-packaging overlap required
 replacing the complete final three-backend self round. Original observations
 and the exclusion reason are retained in [`hap.json`](../benchmarks/hap.json).
 
-## Same-index reader comparison (2026-10-29)
+### Same-index reader comparison (2026-10-29)
 
 The complete HAP examples were rerun with the previous and optimized joint-v4
 readers on identical index files. Four-round total time medians were

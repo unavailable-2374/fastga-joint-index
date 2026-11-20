@@ -2,10 +2,15 @@
 
 [中文说明](README.zh-CN.md)
 
-An experimental, lossless, two-genome index backend for FastGA. Build directly
-from FASTA, store reference occurrences once, and represent matching query
-occurrences through exact relative copies plus residual positions. A
-minimizer-anchor finder supplies the copies; FastGA still performs the adaptive seeding, chaining and alignment.
+An experimental, lossless joint index backend for FastGA, for 2–64 genomes.
+Build directly from FASTA, store the first genome's seed occurrences once, and
+represent every later genome's matching occurrences through exact copies from
+the earlier genomes plus residual positions. A minimizer-anchor finder supplies
+the copies; FastGA still performs the adaptive seeding, chaining and alignment.
+Alignments are byte-identical to upstream FastGA and the index is 0.18–0.36× the
+size of the upstream indexes. Alignment is 4–5× faster than upstream FastGA on
+the human pair and on merged-genome self-alignments, and between 0.7× and 1.35×
+on small cross-species pairs ([measurements](#measured-results)).
 
 The lossless storage contract originates in the validated integration.
 This standalone repository maintains the C/C++ implementation, including reader
@@ -171,71 +176,98 @@ Use reference,query order in `--samples`. The descriptor must have the GDB's
 stem and directory. Creating a new view needs the original sample GDBs; reading
 an existing view needs only that view's GDB/BPS and the physical index bundle.
 
-## Current version compared with original FastGA
+## How it stays small and fast
 
-Real measurements on the complete *Macaca nemestrina* haplotype pair
-(PR00030, hap1 as reference, hap2 as query), `-T24 -pafx`, one shared Linux host
-with 256 logical CPUs. Original FastGA is the unmodified upstream build
-(`FastGA-baseline`); the current version is `FastGA-shared` with the
-minimizer-anchor copy finder.
+**The index is small because shared sequence is stored once; alignment is fast
+because of a reworked alignment engine.** The joint index stores the first
+genome's seed positions in full. Each later genome copies from all earlier ones:
+a minimizer-anchor finder (k=21, w=20) locates exact shared runs of at least
+40 bp against a pseudo reference made of the earlier genomes' sequence, and every
+40-mer seed occurrence inside those runs is inherited instead of stored, after
+checking for each copied seed that both genomes select it. Only the seeds
+outside the copies are written as new rows, each carrying a weight for the
+occurrences it stands for; six human haplotypes need 2.91 billion stored rows for
+13.35 billion occurrences. The index stays lossless: the reader expands every row
+back into all of its occurrences through the copy tables, which is why every
+alignment below is byte-identical to upstream FastGA and every sample decodes to
+the same rows as upstream GIXmake.
 
-| Measure | Original FastGA | FastGA-shared | Difference |
-|---|---:|---:|---:|
-| PAF output | 540,544 lines, 14,770,377,539 B | byte-identical (`cmp`), both runs | none |
-| Index files, GDB sequence excluded | 64,450,238,138 B (`.gix` + `.ktab.*`, both genomes) | 13,034,351,452 B (all joint index files) | 20.2% of original, 4.94× smaller |
-| End-to-end wall time (index + alignment) | 2,149 s | 2,286 s; 2,332 s | +6.3%; +8.5% |
-| End-to-end CPU (user + system) | 9,029 core-s (420% CPU) | 18,186; 19,165 core-s | 2.01×; 2.12× |
-| End-to-end peak RSS | 19,210,152 KiB (18.32 GiB) | 19,739,836; 19,702,008 KiB (18.83; 18.79 GiB) | +2.8%; +2.6% |
+The speed comes mainly from the FastGA-shared alignment engine. A shared pool of
+compute tokens keeps the threads that compute at or below `-T`, so loading the
+next seed part overlaps with searching instead of competing for cores, and the
+seed merge itself was optimized. Even on plain upstream indexes FastGA-shared is
+up to 5.4× faster than upstream FastGA (1.0–1.6× on the small pairs). Reading the
+joint index adds a decoding cost: 0–16% on the human pair and the merged genomes,
+2–46% on the small pairs, whose alignments take only 25–40 s. Building the index streams every genome through one fused
+writer with no intermediate spool, but it remains slower than building upstream
+indexes, so the trade is a much smaller index and faster alignment for a longer
+one-time build.
 
-The GDB sequence files (`.bps`, 1,543,856,064 B for both genomes) are identical
-in both setups and are excluded from the index sizes.
+## Measured results
 
-For the current version alone:
-- Index construction takes 584 s.
-- The copy finder takes 94 s and the merge 445 s.
-- Peak RSS of a standalone index build is 15,515,908 KiB (14.80 GiB), so the end-to-end peak occurs during alignment.
-- Exact copies cover 97.60% of query bases, leaving 395.1 million residual index rows.
+Complete real assemblies (accessions in
+[`benchmarks/current/samples.tsv`](benchmarks/current/samples.tsv)), one shared
+Linux host with 256 logical CPUs, every program at `-T24` pinned to 24 CPUs,
+alignment options `-pafx -f10 -c85 -s1000 -l100 -i0.7`. Upstream FastGA is the
+unmodified build; FastGA-shared is commit `d4efe6a`. Every alignment's sorted
+PAF has the same SHA-256 and record count as upstream FastGA. Each configuration
+and direction ran once (round 1); a second round of the same configurations
+differed by up to 61% on the 15–70 s pair alignments and by 10–23% on the human
+pair, so differences of that size between the two FastGA-shared columns are not
+meaningful.
+Index sizes count every file of the index directory, including the GDB sequence
+files, which are identical in both setups. Upstream columns were measured on
+2026-11-16/18, FastGA-shared columns on 2026-11-20. Data:
+[`benchmarks/current/`](benchmarks/current/); figures:
+[pairs](docs/figures/pairs.pdf), [merged genomes](docs/figures/merge.pdf).
 
-Caveats:
-- Every row is a single run, and the host was shared. Load averages were 85–200 during the original run and 65–161 during the two current runs.
-- The wall-time gap is therefore approximate.
-- The original run used only 420% CPU, so much of the extra CPU in the current version ran on otherwise idle cores.
-- Original FastGA index construction was not timed separately from alignment.
-- A human CHM13 versus HG002 comparison with separate index and alignment timing is in progress and is not reported here.
+**Pairs of genomes.** Alignment time is the mean of A→B and B→A.
 
-## What has actually been measured
+| Pair (A / B) | Upstream indexes A+B | Joint index | Upstream FastGA | FastGA-shared, upstream index | FastGA-shared, joint index | Build, upstream A+B | Build, joint | Peak RSS, upstream / joint |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| *W. vidua* / *P. parallelum* | 25.84 GiB | 8.41 GiB (0.33×) | 38.6 s | 25.6 s | 28.7 s | 44.2 s | 93.7 s | 3.0 / 5.9 GiB |
+| *P. vaucheri* / *A. gentilis* | 31.40 GiB | 10.24 GiB (0.33×) | 30.5 s | 26.5 s | 29.9 s | 58.8 s | 153.7 s | 4.7 / 7.3 GiB |
+| *G. mutica* / *A. ochrocephala* | 37.70 GiB | 12.14 GiB (0.32×) | 41.2 s | 25.6 s | 37.4 s | 69.2 s | 134.6 s | 11.0 / 9.2 GiB |
+| *A. centrarchus* / *P. auritus* | 31.02 GiB | 10.66 GiB (0.34×) | 23.5 s | 23.7 s | 32.9 s | 58.2 s | 121.9 s | 2.4 / 6.7 GiB |
+| *C. striatus* / *E. lucius* | 22.78 GiB | 7.15 GiB (0.31×) | 30.3 s | 24.6 s | 25.0 s | 52.0 s | 91.7 s | 6.1 / 5.3 GiB |
+| HG002 / HG005 (human, paternal) | 62.56 GiB | 11.47 GiB (0.18×) | 5,426 s | 997 s | 1,125 s | 114.6 s | 274.7 s | 11.6 / 14.3 GiB |
 
-The following are real observations from the original integration, before this
-standalone extraction. Common GDB sequence storage is excluded and reported
-separately. No human speed median or completed human self-alignment is claimed.
+The six joint builds ran concurrently with one another, so the joint build times
+include contention for memory bandwidth and `/dev/shm`.
 
-| Complete inputs | Native pair | Independent v3 pair | Joint index, all three views |
-|---|---:|---:|---:|
-| Upstream HAP examples | 1.955 GB | 0.632 GB | 0.500 GB |
-| Human HG002 + HG005 | 65.704 GB | 23.121 GB | 11.779 GB |
+**Merged genomes, self-alignment.** N cross-species genomes M1–MN (2.19, 2.16,
+1.48, 1.27, 1.79 and 1.46 Gbp) merged into one FASTA and self-aligned; the joint
+index is one N-sample bundle plus a merged view.
 
-Human index records were checked in full, including the merged view's
-4,362,338,887 logical occurrences. The two directional correctness runs have
-identical complete native/joint seed-pair multisets and PAF/CIGAR outputs.
-Human alignment experiments were stopped at the user's request before the
-four-round timing study and merged self-alignment completed.
+| N | N separate upstream indexes | Upstream index of the merged genome | Joint index | Upstream FastGA | FastGA-shared, upstream index | FastGA-shared, joint index | Build: N upstream / merged upstream / joint | Peak RSS, upstream / joint |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 61.68 GiB | 62.78 GiB | 20.62 GiB (0.33×) | 9,304 s | 1,903 s | 1,884 s (4.9×) | 136 / 85 / 264 s | 18.2 / 18.0 GiB |
+| 4 | 75.35 GiB | 76.40 GiB | 26.23 GiB (0.35×) | 10,921 s | 2,110 s | 2,446 s (4.5×) | 161 / 174 / 552 s | 18.7 / 22.5 GiB |
+| 5 | 93.33 GiB | 95.60 GiB | 33.11 GiB (0.35×) | 11,113 s | 2,071 s | 2,372 s (4.7×) | 196 / 162 / 791 s | 23.6 / 27.6 GiB |
+| 6 | 108.27 GiB | 111.52 GiB | 39.37 GiB (0.36×) | 10,449 s | 2,365 s | 2,594 s (4.0×) | 224 / 288 / 802 s | 23.5 / 33.9 GiB |
 
-The complete HAP example acceptance passed: directional and merged self outputs
-match, and four-round joint/v3 time ratios are 1.178, 1.145 and 1.053. These are
-descriptive measurements on a 12-logical-CPU macOS host using `-T24`, with
-uncontrolled OS cache. They are not human-genome performance measurements.
+For each N the two FastGA-shared self-alignments started together. The joint peak
+RSS comes from the build for N=4–6 and from the alignment for N=3; the upstream
+peak comes from the alignment.
 
-A separate same-index HAP reader comparison on 2026-10-29 measured the optimized
-joint reader against the previous joint reader: four-round total wall-time
-medians decreased by 7.4%, 4.5% and 6.5% for A → B, B → A and merged self. Full
-record/seed/PAF controls passed; index bytes stayed unchanged. Both columns used
-joint v4 on a 12-logical-CPU Apple M2 Pro with `-T24` and uncontrolled OS cache.
-[All observations and paired sensitivity](docs/reader-optimization.md#complete-hap-reader-comparison-2026-10-29)
-are reported separately from the historical native/v3 comparison.
+**Six human haplotypes in one bundle.** HPRC Year 1 HG002, HG005 and HG00438,
+paternal and maternal
+([`benchmarks/current/hprc6.json`](benchmarks/current/hprc6.json)):
 
-See [benchmark details](docs/benchmarks.md) and the [real result summaries](benchmarks/).
-Standalone extraction verification is recorded separately from these historical
-full-input measurements.
+| Measure | Value |
+|---|---:|
+| Build (`GIXmake-shared -T24`, all six) | 683 s, peak RSS 24.3 GiB |
+| Index size | 15.66 GB (14.59 GiB) |
+| Stored rows / occurrences | 2,908,024,513 / 13,345,046,896 (21.8%) |
+| `gixshare verify-equivalent` against upstream GIXmake, every sample | PASS, all 13,345,046,896 rows |
+| HG002P → HG005P alignment from the bundle | 1,157 s, peak RSS 9.4 GiB, 492,284 records identical to upstream |
+
+Later haplotypes inherit 91–95% of their occurrences. For comparison, one upstream
+human haplotype index is about 31 GiB (HG002/HG005 pair above).
+
+Earlier measurements (the *Macaca nemestrina* pair, the original integration's
+HAP and HG002/HG005 checks, reader comparisons) are kept in
+[benchmark details](docs/benchmarks.md).
 
 ## Reproduce a complete comparison
 
@@ -293,8 +325,8 @@ batched restoration and bitmap rank/select.
 | `scripts/` | Complete-input benchmarks, validation and FASTA preparation |
 | `tests/` | Explicitly labelled simulated correctness fixtures |
 | `vendor/`, `patches/` | Pinned upstream sources and reviewable modifications |
-| `docs/` | Method, binary format, reproducibility and measured results |
-| `benchmarks/` | Real result summaries without private machine paths |
+| `docs/` | Method, binary format, reproducibility and measured results; `docs/figures/` holds the result figures |
+| `benchmarks/` | Real result summaries without private machine paths; `benchmarks/current/` holds the tables above |
 
 Read the [method](docs/method.md), [v4 format](docs/format.md), and
 [upstream changes](docs/upstream.md). Third-party license texts are retained;
