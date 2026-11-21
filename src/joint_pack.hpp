@@ -177,7 +177,7 @@ struct RangeOutN{
 // sample s >= 1 its residual); META_s are the samples' original metas; COPYDIR holds joint.<i>.<j>.copies for every
 // target i and earlier source j. Writes the codec-3 bundle (see joint_companions) and one view NAME_s.gix per sample.
 void joint_pack_n(const fs::path&root,const std::vector<std::string>&names,const std::vector<fs::path>&meta_paths,const fs::path&copydir){
-    const unsigned N=unsigned(names.size());if(N<3||N>64||meta_paths.size()!=N)fail("joint-pack-n needs 3..64 samples and a meta per sample");
+    const unsigned N=unsigned(names.size());if(N<3||N>JOINT_MAX_SAMPLES||meta_paths.size()!=N)fail("joint-pack-n needs 3.."+std::to_string(JOINT_MAX_SAMPLES)+" samples and a meta per sample");
     auto t0=std::chrono::steady_clock::now();auto phase=[&](const char*name){std::fprintf(stderr,"joint-pack-n: %s done at %.1f s\n",name,std::chrono::duration<double>(std::chrono::steady_clock::now()-t0).count());};
     std::vector<std::shared_ptr<Shared>>arch;std::vector<pm::Meta>metas;
     for(unsigned s=0;s<N;++s){arch.push_back(std::make_shared<Shared>(root/(names[s]+".gix")));if(arch.back()->a.version!=3)fail("joint pack needs v3 sample archives");metas.push_back(pm::Meta::read(meta_paths[s].string()));}

@@ -2,7 +2,7 @@
 
 The storage contract is the complete, corrected native FastGA seed stream:
 keys, masks, strands, contigs, positions and multiplicities. Sampling and
-alignment sensitivity are preserved. The implementation takes 2–64 named inputs
+alignment sensitivity are preserved. The implementation takes 2–32 named inputs
 and k=40. The first input (or `--reference`) is stored in full; every later input
 copies from all earlier ones, so input order affects compression but not results.
 

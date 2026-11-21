@@ -77,7 +77,7 @@ struct JointFuse {
         if(n_samples()){
             if(!copies.empty()||!reference_meta.empty()||!target_meta.empty())throw std::runtime_error("--joint-copy-dir/--joint-metas (N samples) exclude the two-sample --joint-* options");
             if(copy_dir.empty()||metas.size()!=samples)throw std::runtime_error("N-sample joint output needs --joint-copy-dir and one --joint-metas entry per sample");
-            if(!joint_templates||samples<3||samples>64)throw std::runtime_error("N-sample joint output needs --storage joint-template and 3..64 samples");
+            if(!joint_templates||samples<3||samples>JOINT_MAX_SAMPLES)throw std::runtime_error("N-sample joint output needs --storage joint-template and 3.."+std::to_string(JOINT_MAX_SAMPLES)+" samples");
             return;
         }
         if(copies.empty()||reference_meta.empty()||target_meta.empty())throw std::runtime_error("joint output needs --joint-copies, --joint-reference-meta and --joint-target-meta together");
@@ -863,7 +863,7 @@ int main(int argc,char **argv){try{sjio::guard_stdout("gixshare");
         if(argc==10)sg::threads(argv[9]);sg::joint_pack(argv[2],argv[3],argv[4],argv[5],argv[6],argv[7]);return 0;}
     if(argc>=4&&!strcmp(argv[1],"joint-pack-n")){ // ROOT N NAME... META... COPYDIR [--threads T]
         int last=argc;if(argc>=2&&!strcmp(argv[argc-2],"--threads")){sg::threads(argv[argc-1]);last=argc-2;}
-        unsigned n=std::stoul(argv[3]);if(n<3||n>64||last!=int(5+2*n))sg::fail("usage: gixshare joint-pack-n ROOT N NAME_0..NAME_N-1 META_0..META_N-1 COPYDIR [--threads T]");
+        unsigned n=std::stoul(argv[3]);if(n<3||n>JOINT_MAX_SAMPLES||last!=int(5+2*n))sg::fail("usage: gixshare joint-pack-n ROOT N NAME_0..NAME_N-1 META_0..META_N-1 COPYDIR [--threads T]");
         std::vector<std::string>names;std::vector<sg::fs::path>metas;for(unsigned i=0;i<n;++i){names.emplace_back(argv[4+i]);metas.emplace_back(argv[4+n+i]);}
         sg::joint_pack_n(argv[2],names,metas,argv[4+2*n]);return 0;}
     if(argc==10&&!strcmp(argv[1],"view")){

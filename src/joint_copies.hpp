@@ -19,6 +19,8 @@
 #include <sys/mman.h>
 #include <cstdlib>
 #include <new>
+// Most samples one joint bundle holds: a view descriptor records its selected samples as a 32-bit mask.
+constexpr unsigned JOINT_MAX_SAMPLES=32;
 namespace jc {
 // Sub-phrase re-anchoring: diagonal band (bases) around the flanking copies and maximum refinement rounds.
 constexpr int64_t kBand=1024;constexpr unsigned kRounds=3;

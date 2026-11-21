@@ -136,10 +136,10 @@ GIXmake-shared -T24 --input A=A.fa --input B=B.fa --input C=C.fa --input D=D.fa 
 ```
 
 Create the parent output directory first. `--storage auto` is the default: two
-inputs choose joint v4 with the first input as reference; three to 64 inputs choose
+inputs choose joint v4 with the first input as reference; three to 32 inputs choose
 the N-sample joint bundle (native backend; storage order is input order with the
 reference moved first, and each sample copies from all earlier ones), or source v3
-with `--backend pfp`; one input uses source v3. `--copy-index-mib M` (N-sample
+with `--backend pfp`; one input and more than 32 inputs use source v3. `--copy-index-mib M` (N-sample
 joint only, default 0 = one part) bounds the copy finder's minimizer table to parts of
 at most M MiB, lowering its peak memory at the cost of one reference scan per extra
 part; the index does not depend on it. Explicit `legacy`, `positions`, `source` and `joint` modes are supported

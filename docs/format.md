@@ -1,6 +1,6 @@
 # Joint FastGA indexes, version 4 (physical position archives: container version 5)
 
-This is an opt-in, lossless relative occurrence index of two genomes, or of 3–64
+This is an opt-in, lossless relative occurrence index of two genomes, or of 3–32
 genomes (see [Three or more samples](#three-or-more-samples)). It is built
 from FASTA without a native GIX intermediate. Native sampling, multiplicity,
 prefix selection, frequency cutoffs, masking, chaining and local alignment
@@ -187,7 +187,7 @@ requires identical bytes (every thread count, both backends).
 
 ## Three or more samples
 
-`GIXmake-shared` with 3–64 inputs and `--storage joint` (also the `auto` choice
+`GIXmake-shared` with 3–32 inputs and `--storage joint` (also the `auto` choice
 with the native backend) builds one bundle for all samples. Input order is the
 storage order: sample 0 (the `--reference`, by default the first input) is stored
 in full, and sample i copies from samples 0..i-1. The pfp backend has no N-sample

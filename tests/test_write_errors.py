@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """SIMULATED TEST DATA: output write failures (ENOSPC on /dev/full, EFBIG from RLIMIT_FSIZE) must end in a
-diagnostic naming the program and a non-zero exit status, never in a truncated output with status 0."""
+diagnostic naming the program and a non-zero exit status, never in a truncated output with status 0. ALNtoPAF,
+which formats chunks on its threads and writes them in order, must give the same bytes for any thread count."""
 import argparse
 import json
 import os
@@ -23,10 +24,10 @@ def main():
             root=Path(directory);scratch=root/'scratch';scratch.mkdir()
             env=dict(os.environ,PATH=str(binary)+os.pathsep+os.environ['PATH'])
             rng=random.Random(5120)
-            base=''.join(rng.choices('ACGT',k=80000))
-            mutated=''.join(rng.choice('ACGT') if rng.random()<0.02 else c for c in base)
-            for name,sequence in (('A',base),('B',mutated)):
-                (root/(name+'.fa')).write_text(f'>TEST_SIMULATED_{name}\n'+sequence+'\n')
+            base=[''.join(rng.choices('ACGT',k=20000)) for _ in range(24)]
+            mutated=[''.join(rng.choice('ACGT') if rng.random()<0.02 else c for c in contig) for contig in base]
+            for name,contigs in (('A',base),('B',mutated)):
+                (root/(name+'.fa')).write_text(''.join(f'>TEST_SIMULATED_{name}_{i}\n{c}\n' for i,c in enumerate(contigs)))
             def limited(size):
                 def prepare():
                     signal.signal(signal.SIGXFSZ,signal.SIG_IGN)
@@ -62,9 +63,15 @@ def main():
             with open(root/'cut.paf','wb') as cut:
                 must_fail('ALNtoPAF stdout over the file size limit',
                           run(['ALNtoPAF','-x','-T4','aln.1aln'],stdout=cut,limit=paf_bytes//2),'ALNtoPAF','File too large')
-            with open(root/'cut1.paf','wb') as cut:
-                must_fail('ALNtoPAF temporary part over the file size limit',
-                          run(['ALNtoPAF','-x','-T1','aln.1aln'],stdout=cut,limit=paf_bytes//2),'ALNtoPAF','temporary file')
+            for options in (['-x'],[]):
+                outputs={threads:run(['ALNtoPAF',*options,f'-T{threads}','aln.1aln']) for threads in (1,3,8,64)}
+                for threads,proc in outputs.items():
+                    if proc.returncode:raise RuntimeError(f'ALNtoPAF -T{threads} failed with: '+proc.stderr.decode())
+                if len(outputs[1].stdout.splitlines())<24:raise RuntimeError('too few simulated alignments to test chunking')
+                if len({proc.stdout for proc in outputs.values()})!=1:
+                    raise RuntimeError(f'ALNtoPAF {options} output depends on the thread count')
+                report['checks'].append(dict(case=f'ALNtoPAF {" ".join(options)} -T1/3/8/64 identical',status='PASS',
+                                             records=len(outputs[1].stdout.splitlines())))
             (root/'bps').mkdir()
             must_fail('FAtoGDB sequence file over the file size limit',run(['FAtoGDB',root/'A.fa',root/'bps'/'A'],limit=4096),'FAtoGDB')
             report['status']='PASS'

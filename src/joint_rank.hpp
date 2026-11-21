@@ -98,7 +98,7 @@ struct JointRankBlock {
     }
     uint64_t selected_weight(unsigned i,unsigned selection)const{uint64_t total=0;for(unsigned t=0;t<samples;++t)if(selection>>t&1)total+=weight_of(i,t);return total;}
     void decode_samples(const Bytes&raw,size_t&at){
-        if(samples<3||samples>64)fail("joint order codec 3 needs 3..64 samples");
+        if(samples<3||samples>JOINT_MAX_SAMPLES)fail("joint order codec 3 needs 3.."+std::to_string(JOINT_MAX_SAMPLES)+" samples");
         unsigned ob=0;while((1u<<ob)<samples)++ob;
         const size_t plane=(count+7)/8,planes=ob+samples-1;
         if(raw.size()<plane*planes+samples-1)fail("truncated joint sample bitplanes");
@@ -144,7 +144,7 @@ struct JointRankBlock {
         auto h=heavies[i/64]+pop(heavy[i/64]&low(i%64));return {0,large[h]};
     }
     unsigned select(uint64_t row,unsigned selection)const{
-        if(selection<1||(samples<64&&selection>=(1ull<<samples))||row>=before(count,selection))fail("joint row select failed");
+        if(selection<1||selection>=(1ull<<samples)||row>=before(count,selection))fail("joint row select failed");
         unsigned l=0,r=words+1;
         while(l<r){auto m=(l+r)/2;if(before(std::min(m*64,count),selection)<=row)l=m+1;else r=m;}
         unsigned word=l-1,begin=word*64,end=std::min(begin+64,count);

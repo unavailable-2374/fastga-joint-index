@@ -156,7 +156,7 @@ public:
         return "{\"format_version\":4,\"reference_rows\":"+std::to_string(ar)+",\"target_rows\":"+std::to_string(bt)+",\"residual_rows\":"+std::to_string(br)+",\"physical_rows\":"+std::to_string(order.count)+",\"copy_blocks\":"+std::to_string(copies.size())+",\"target_rows_after_equal_key_reference\":"+std::to_string(reordered)+"}";
     }
 };
-// N samples (3..64): the state with which the range consumer (build_streams_ranged) computes, from the samples'
+// N samples (3..JOINT_MAX_SAMPLES): the state with which the range consumer (build_streams_ranged) computes, from the samples'
 // filtered streams, what build-stream + joint-pack-n compute from per-sample v3 archives. Ranges weigh their rows
 // through from[j] (the Stabs of sample j's copies into samples j+1..N-1, ascending) and count per-sample weighted
 // frequencies in cnt (ranges touch disjoint prefixes); the main thread keeps the directory and writes joint.order.
@@ -167,7 +167,7 @@ public:
     std::vector<std::vector<int64>> cnt;Writer order;std::vector<std::vector<uint64_t>> drows,docc;std::vector<uint64_t> occ;
     JointSinkN(const fs::path&dest,std::vector<std::string> sample_names,const fs::path&copydir,const std::vector<std::string>&meta_paths)
       :root(dest),names(std::move(sample_names)),N(unsigned(names.size())),cnt(N,std::vector<int64>(1u<<24,0)),order(dest/"joint.order",ORDER_MAGIC,10),occ(N,0){
-        if(N<3||N>64||meta_paths.size()!=N)fail("N-sample joint output needs 3..64 samples and one meta per sample");
+        if(N<3||N>JOINT_MAX_SAMPLES||meta_paths.size()!=N)fail("N-sample joint output needs 3.."+std::to_string(JOINT_MAX_SAMPLES)+" samples and one meta per sample");
         put32(order.h.data()+76,3);
         for(auto&m:meta_paths)metas.push_back(pm::Meta::read(m));
         copies.resize(N);for(unsigned i=1;i<N;++i){copies[i].resize(i);for(unsigned j=0;j<i;++j)copies[i][j]=jc::load((copydir/("joint."+std::to_string(i)+"."+std::to_string(j)+".copies")).string(),metas[j],metas[i]);}

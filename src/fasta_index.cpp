@@ -118,7 +118,7 @@ int index_main(int argc, char **argv) {
         auto path=fs::canonical(item.second);
         sample_for(item.first)["masks"].push_back({{"path",path.string()},{"sha256",sha256(path)}});
     }
-    if (settings.storage=="auto") settings.storage=samples.size()==2 || (samples.size()>2 && settings.backend=="native")?"joint":"source";
+    if (settings.storage=="auto") settings.storage=samples.size()==2 || (samples.size()>2 && samples.size()<=32 && settings.backend=="native")?"joint":"source"; // joint holds at most 32 samples
     if (settings.storage=="joint") {
         if (reference.empty()) reference=samples[0].at("sample").get<std::string>();
         sample_for(reference);

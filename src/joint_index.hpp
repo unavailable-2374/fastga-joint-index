@@ -26,7 +26,7 @@ struct View {
         auto e=read_at(file.fd,extra,file.size-extra);if(crc(e)!=u32(h.data()+88))fail("joint view mapping checksum mismatch");size_t at=0;auto size=take(e,at);if(size>e.size()-at)fail("truncated joint view path");
         std::string rel((char*)e.data()+at,size);at+=size;if(rel.empty()||rel.find('\0')!=std::string::npos)fail("invalid joint view path");root=fs::weakly_canonical(p.parent_path()/rel);
         while(at<e.size()){if(maps.size()>=64)fail("too many joint contig mappings");auto k=take(e,at);if(k>20000000||k>(e.size()-at)/4)fail("invalid joint contig mapping");maps.emplace_back(k);for(auto&x:maps.back()){x=int32_t(u32(e.data()+at));at+=4;if(x< -1||x>=m.ncontig)fail("joint mapped contig out of range");}}
-        if(maps.size()<2||(maps.size()<64&&selection>=(1ull<<maps.size())))fail("invalid joint view sample mappings");amap=maps[0];bmap=maps[1];
+        if(maps.size()<2||maps.size()>JOINT_MAX_SAMPLES||selection>=(1ull<<maps.size()))fail("invalid joint view sample mappings");amap=maps[0];bmap=maps[1];
     }
 };
 struct Physical {
@@ -88,12 +88,12 @@ inline std::vector<std::string> joint_companions(unsigned samples){
     for(unsigned i=1;i<samples;++i)for(unsigned j=0;j<i;++j)out.push_back(joint_copy_name(i,j));return out;
 }
 // Bound of the order metadata: two varints, one directory entry per block plus one (32 bytes for two samples,
-// 16 bytes per sample for up to 64 samples), then the companion CRCs; derived from the validated block count.
+// 16 bytes per sample for up to JOINT_MAX_SAMPLES samples), then the companion CRCs; derived from the validated block count.
 uint64_t order_meta_max(const Archive&order){uint64_t n=order.blocks.size()+1;
     return u32(order.h.data()+76)==3?20+n*16*64+4*uint64_t(64+64+64*63/2):10+n*32+20;}
 fs::path joint_checked_metadata(const fs::path&root,const Archive&order){
     if(u32(order.h.data()+76)==3){ // N samples: varint N, varint entries, entries of 2N uint64, then the companion CRCs
-        auto raw=unpack_meta(order,order_meta_max(order));size_t at=0;auto samples=take(raw,at);if(samples<3||samples>64)fail("invalid joint sample count");
+        auto raw=unpack_meta(order,order_meta_max(order));size_t at=0;auto samples=take(raw,at);if(samples<3||samples>JOINT_MAX_SAMPLES)fail("invalid joint sample count");
         auto n=take(raw,at);if(n!=order.blocks.size()+1||n>(raw.size()-at)/(16*samples))fail("joint companion directory bounds mismatch");at+=n*16*samples;
         auto names=joint_companions(unsigned(samples));if(raw.size()-at!=4*names.size())fail("joint companion checksum dimensions mismatch");
         for(auto&name:names){File f(root/name);bool archive=name.find(".sgr")!=std::string::npos;auto bytes=read_at(f.fd,0,archive?124:f.size);if(u32(raw.data()+at)!=crc(bytes))fail("joint companion identity mismatch: "+name);at+=4;}
@@ -212,7 +212,7 @@ struct JointData {
         if(u32(view.h.data()+92)!=u32(order.h.data()+124))fail("joint view/order identity mismatch");
         if(bundle->samples==2&&view.count!=cumulative(dir.back()))fail("joint view/order/physical count mismatch");
         n=bundle->samples;
-        if(view.maps.size()!=n||(n<64&&view.selection>=(1ull<<n)))fail("joint view/bundle sample count mismatch");
+        if(view.maps.size()!=n||view.selection>=(1ull<<n))fail("joint view/bundle sample count mismatch");
         for(unsigned s=0;s<n;++s)if(view.maps[s].size()!=bundle->meta(s).contigs.size())fail("joint view/source contig dimensions mismatch");
         if(n>2&&view.count!=cumulative_at(dir.size()-1))fail("joint view/order/physical count mismatch");
         inverse.resize(view.m.ncontig);for(size_t i=0;i<view.m.perm.size();++i)inverse[view.m.perm[i]]=i;

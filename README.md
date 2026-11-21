@@ -2,7 +2,7 @@
 
 [中文说明](README.zh-CN.md)
 
-An experimental, lossless joint index backend for FastGA, for 2–64 genomes.
+An experimental, lossless joint index backend for FastGA, for 2–32 genomes.
 Build directly from FASTA, store the first genome's seed occurrences once, and
 represent every later genome's matching occurrences through exact copies from
 the earlier genomes plus residual positions. A minimizer-anchor finder supplies
@@ -127,7 +127,7 @@ FastGA-shared -T24 -pafx indexes/joint/A.gix indexes/joint/B.gix > A-to-B.paf
 FastGA-shared -T24 -pafx indexes/joint/B.gix indexes/joint/A.gix > B-to-A.paf
 ```
 
-Three to 64 inputs build one N-sample joint bundle; any two of its views align as above:
+Three to 32 inputs build one N-sample joint bundle; any two of its views align as above:
 
 ```sh
 GIXmake-shared --threads 24 \
@@ -149,7 +149,7 @@ minimizer-anchor finder; only the pfp backend parses with PFP. Existing v1/v2/v3
 the same build. The non-joint storage modes remain available for comparisons.
 
 `GIXmake-shared --help` lists all parameters. Its default `--storage auto` chooses
-joint v4 for two or more inputs (two with `--backend pfp`) and source v3 otherwise;
+joint v4 for 2–32 inputs (exactly two with `--backend pfp`) and source v3 otherwise;
 the first input is the default joint reference. With three or more inputs each
 input copies from all earlier ones, so list the most complete assembly first;
 `--copy-index-mib` caps the copy finder's memory (see [format](docs/format.md)). Explicit `legacy`, `positions`, `source` and `joint` modes are

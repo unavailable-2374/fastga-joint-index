@@ -12,7 +12,8 @@ and every file not bound to its GDB identical. Separate builds cannot be compare
 path and time into each GDB's provenance line and the GIX, order and archive headers carry a checksum of their GDB;
 (3) every sample's GIX of every build decodes to the rows of upstream GIXmake on a copy of the build's GDB (gixshare
 verify-equivalent), without and with the soft mask; (4) every later sample inherits occurrences, and some copy has a
-source other than M1; (5) the PFP backend, --copy-index-mib with two inputs and the serial consumer are rejected."""
+source other than M1; (5) the PFP backend, --copy-index-mib with two inputs, the serial consumer and more than 32 inputs
+(a view records its samples in a 32-bit mask) are rejected."""
 import argparse
 from hashlib import sha256
 import json
@@ -99,6 +100,8 @@ def main():
             build('reject-pfp', '-T4', '--backend', 'pfp', '--storage', 'joint', rejection='joint storage of three or more samples uses the native backend')
             build('reject-mib', '-T4', '--copy-index-mib', '1', files=inputs[:4], rejection='--copy-index-mib applies only to joint storage of three or more samples')
             build('reject-serial', '-T4', env={'FASTGA_SHARED_STREAM_RANGES': '0'}, rejection='the N-sample joint writer needs the range consumer')
+            many = [x for i in range(33) for x in ('--input', f'S{i}={root / NAMES[i % 4]}.fa')]
+            build('reject-33', '-T4', '--storage', 'joint', files=many, rejection='joint storage holds at most 32 samples')
             # (1) fused == two-step == fused at other thread and range counts, on the same staged GDB files
             oracle = root / 'oracle'
             ref, info = build('ref', '-T4', env={'FASTGA_SHARED_JOINT_ORACLE': str(oracle), 'FASTGA_SHARED_JOINT_REPLAY_THREADS': '1,2,3',

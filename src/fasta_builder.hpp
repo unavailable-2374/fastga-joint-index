@@ -25,7 +25,7 @@ inline Json make_configuration(const fs::path &binary, const fs::path &driver, J
     if (joint && samples.size()<2) throw std::runtime_error("joint storage needs at least two samples");
     const bool many=joint && samples.size()>2; // N-sample joint bundle: each sample copies from all earlier ones
     if (many && pfp) throw std::runtime_error("joint storage of three or more samples uses the native backend");
-    if (joint && samples.size()>64) throw std::runtime_error("joint storage holds at most 64 samples");
+    if (joint && samples.size()>32) throw std::runtime_error("joint storage holds at most 32 samples"); // JOINT_MAX_SAMPLES: view descriptors hold a 32-bit sample mask
     if (settings.copy_index_mib<0 || (settings.copy_index_mib && !many))
         throw std::runtime_error("--copy-index-mib applies only to joint storage of three or more samples");
     if (joint && pfp && (settings.window!=10 || settings.modulus!=100)) throw std::runtime_error("joint v4 requires --pfp-window 10 --pfp-modulus 100 with the pfp backend");

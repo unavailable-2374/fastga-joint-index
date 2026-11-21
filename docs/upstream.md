@@ -37,7 +37,14 @@ optional complete seed audit. The corrected native baseline also contains:
   can no longer let a sorter thread run ahead.
 * `ALNtoPSL` trims trailing INDELs only while the trace is non-empty: an alignment without INDELs has an empty trace,
   and upstream then reads `trace[-1]` (an out-of-bounds read under ASan, a crash under TSan).
-* checked output writes: `ALNtoPAF`/`ALNtoPSL` verify their part files and standard output (flush, `ferror`, `fclose`),
+* `ALNtoPAF` balances its threads: upstream gives each thread an equal count of alignments, but CIGAR (`-x`, `-m`)
+  cost grows with alignment length, so in a four-haplotype human self-alignment half of the 24 threads were idle after
+  5 minutes of a 29-minute conversion, and the threads' temporary files were then copied to standard output by one
+  thread. The alignments are now cut into up to 256 chunks per thread that threads take as they finish one; each chunk
+  is formatted in memory and the main thread writes the chunks in order while the others continue. Threads stay at
+  most 16 chunks per thread ahead of the writer, which bounds the memory held by finished chunks. The output bytes
+  do not depend on the thread count.
+* checked output writes: `ALNtoPAF`/`ALNtoPSL` verify their chunk or part files and standard output (flush, `ferror`, `fclose`),
   the ONE library verifies flush and close of every file it writes, `FAtoGDB` verifies the `.bps` sequence file,
   and `FastGA`/`GIXmake` write seed and index files with a retrying full-write helper. Each failure prints the program,
   file and `strerror` text and exits non-zero (ENOSPC, EFBIG and EIO were all injected during validation).

@@ -4740,54 +4740,275 @@ diff --git a/ALNtoPAF.c b/ALNtoPAF.c
  
  #include "GDB.h"
  #include "align.h"
-@@ -832,7 +833,10 @@
+@@ -42,14 +43,64 @@
+ //  THREAD ROUTINE TO GENERATE A SECTION OF THE DESIRED .PAF FILE
+ 
+ typedef struct
+-  { int64    beg;
+-    int64    end;
+-    GDB      gdb1;
++  { GDB      gdb1;
+     GDB      gdb2;
+     OneFile *in;
+-    FILE    *out;
+   } Packet;
+ 
++//  The alignments are cut into many more chunks than threads; a thread takes the next chunk when
++//    it finishes one, so a few long alignments no longer leave the other threads idle.  Each chunk
++//    is formatted into memory and the main thread writes the chunks to stdout in order as they
++//    complete, so the output is the same bytes for any thread count.  A thread does not start a
++//    chunk more than CHUNK_AHEAD*NTHREADS beyond the next one to write, which bounds the memory
++//    held by finished chunks.
++
++#define CHUNKS_PER_THREAD 256
++#define CHUNK_AHEAD        16
++
++static struct
++  { pthread_mutex_t lock;
++    pthread_cond_t  change;   //  a chunk was finished or written
++    int64           novl;     //  alignments in the input
++    int64           nchunk;   //  chunk c holds alignments [c*novl/nchunk,(c+1)*novl/nchunk)
++    int64           next;     //  next chunk to hand out
++    int64           emit;     //  next chunk to write to stdout
++    int64           ahead;    //  chunks a thread may start beyond emit
++    char          **text;     //  formatted PAF of each finished chunk, NULL until finished
++    size_t         *size;
++  } Chunks;
++
++static int take_chunk(int64 *beg, int64 *end, int64 *chunk)
++{ int64 c;
++
++  pthread_mutex_lock(&Chunks.lock);
++  while (Chunks.next < Chunks.nchunk && Chunks.next >= Chunks.emit + Chunks.ahead)
++    pthread_cond_wait(&Chunks.change,&Chunks.lock);
++  c = Chunks.next;
++  if (c < Chunks.nchunk)
++    Chunks.next += 1;
++  pthread_mutex_unlock(&Chunks.lock);
++  if (c >= Chunks.nchunk)
++    return (0);
++  *chunk = c;
++  *beg   = (c * Chunks.novl) / Chunks.nchunk;
++  *end   = ((c+1) * Chunks.novl) / Chunks.nchunk;
++  return (1);
++}
++
++static void finish_chunk(int64 chunk, FILE *out, char **text, size_t *size)
++{ if (ferror(out) | fclose(out))
++    { fprintf(stderr,"%s: Cannot format PAF chunk %lld in memory: %s\n",
++                     Prog_Name,chunk,strerror(errno));
++      exit (1);
++    }
++  pthread_mutex_lock(&Chunks.lock);
++  Chunks.text[chunk] = *text;
++  Chunks.size[chunk] = *size;
++  pthread_cond_broadcast(&Chunks.change);
++  pthread_mutex_unlock(&Chunks.lock);
++}
++
+ typedef struct
+   { int64 n, m;
+     char *op;
+@@ -102,12 +153,13 @@
+ void *gen_paf(void *args)
+ { Packet *parm = (Packet *) args;
+ 
+-  int64    beg  = parm->beg;
+-  int64    end  = parm->end;
++  int64    beg, end, chunk;
+   GDB     *gdb1 = &(parm->gdb1);
+   GDB     *gdb2 = &(parm->gdb2);
+   OneFile *in   = parm->in;
+-  FILE    *out  = parm->out;
++  FILE    *out;
++  char    *text;
++  size_t   size;
+ 
+   Overlap   _ovl, *ovl = &_ovl;
+   Alignment _aln, *aln = &_aln;
+@@ -130,8 +182,6 @@
+   char          DNA_DBASE[4] = {'a', 'c', 'g', 't'};
+   char          DNA_MBASE[4] = {'A', 'C', 'G', 'T'};
+ 
+-  if (beg >= end) return (NULL);
+-
+   work = New_Work_Data();
+   aseq = New_Contig_Buffer(gdb1);
+   bseq = New_Contig_Buffer(gdb2);
+@@ -160,7 +210,15 @@
+     exit (1);
+   path->trace = (void *) trace;
+ 
+-  //  For each alignment do
++  //  For each chunk and each alignment in it do
++
++  while (take_chunk(&beg,&end,&chunk))
++  { out = open_memstream(&text,&size);
++    if (out == NULL)
++      { fprintf(stderr,"%s: Cannot open PAF chunk %lld in memory: %s\n",
++                       Prog_Name,chunk,strerror(errno));
++        exit (1);
++      }
+ 
+   if (!oneGoto(in,'A',beg+1))
+     { fprintf(stderr,"%s: Can't locate to object %lld in aln file\n",Prog_Name,beg+1);
+@@ -625,6 +683,9 @@
+       alast = acontig;
+     }
+ 
++    finish_chunk(chunk,out,&text,&size);
++  }
++
+   free(cig->op);
+   free(cig->ln);
+   free(trace);
+@@ -783,31 +844,44 @@
+       }
+   }
+ 
+-  //  Divide .1aln into NTHREADS parts
++  //  Cut the .1aln into chunks
+ 
+-  { int p;
++  { int64 n;
+ 
+-    for (p = 0; p < NTHREADS ; p++)
+-      { parm[p].beg = (p * novl) / NTHREADS;
+-        if (p > 0)
+-          parm[p-1].end = parm[p].beg;
+-      }
+-    parm[NTHREADS-1].end = novl;
++    n = (int64) NTHREADS * CHUNKS_PER_THREAD;
++    if (n > novl)
++      n = novl;
++    Chunks.novl   = novl;
++    Chunks.nchunk = n;
++    Chunks.next   = 0;
++    Chunks.emit   = 0;
++#ifdef DEBUG_THREADS
++    Chunks.ahead  = n;
++#else
++    Chunks.ahead  = (int64) NTHREADS * CHUNK_AHEAD;
++#endif
++    Chunks.text   = (char **) Malloc(sizeof(char *)*(n+1),"Allocating chunk texts");
++    Chunks.size   = (size_t *) Malloc(sizeof(size_t)*(n+1),"Allocating chunk sizes");
++    if (Chunks.text == NULL || Chunks.size == NULL)
++      exit (1);
++    for (n = 0; n < Chunks.nchunk; n++)
++      Chunks.text[n] = NULL;
++    pthread_mutex_init(&Chunks.lock,NULL);
++    pthread_cond_init(&Chunks.change,NULL);
+   }
+ 
+-  //   Use NTHREADS to produce .paf for each part and then cat the parts to stdout
++  //   NTHREADS threads format the chunks while this thread writes them to stdout in order
+ 
+-  { int   p, x;
+-    char *oprefix;
+-    char *buffer;
++  { int   p;
++    int64 c;
++    char *text;
++    size_t size;
+ #ifndef DEBUG_THREADS
+     pthread_t threads[NTHREADS];
+ #endif
+ 
+     //  Setup thread packets
+ 
+-    oprefix = Strdup(Numbered_Suffix("_paf.",getpid(),"."),"Allocating temp file prefix");
+-
+     for (p = 0; p < NTHREADS; p++)
+       { parm[p].gdb1 = *gdb1;
+         parm[p].gdb2 = *gdb2;
+@@ -816,25 +890,44 @@
+             parm[p].gdb2.seqs = units2[p];
+           }
+         parm[p].in  = input + p;
+-        parm[p].out = fopen(Numbered_Suffix(oprefix,p,".paf"),"w+");
+-        if (parm[p].out == NULL)
+-          { fprintf(stderr,"%s: Cannot open %s.%d.paf for reading & writing\n",
+-                           Prog_Name,oprefix,p);
+-            exit (1);
+-          }
+-        unlink(Numbered_Suffix(oprefix,p,".paf"));
+       }
+ 
+-    //  Launch and then gather threads
++    //  Launch the threads, write the chunks as they finish, then gather the threads
+ 
+ #ifdef DEBUG_THREADS
+     for (p = 0; p < NTHREADS; p++)
        gen_paf(parm+p);
  #else
-     for (p = 1; p < NTHREADS; p++)
+-    for (p = 1; p < NTHREADS; p++)
 -      pthread_create(threads+p,NULL,gen_paf,parm+p);
+-    gen_paf(parm);
+-    for (p = 1; p < NTHREADS; p++)
++    for (p = 0; p < NTHREADS; p++)
 +      if (pthread_create(threads+p,NULL,gen_paf,parm+p) != 0)
 +        { fprintf(stderr,"%s: Cannot create thread %d\n",Prog_Name,p);
 +          exit (1);
 +        }
-     gen_paf(parm);
-     for (p = 1; p < NTHREADS; p++)
++#endif
++
++    for (c = 0; c < Chunks.nchunk; c++)
++      { pthread_mutex_lock(&Chunks.lock);
++        while (Chunks.text[c] == NULL)
++          pthread_cond_wait(&Chunks.change,&Chunks.lock);
++        text = Chunks.text[c];
++        size = Chunks.size[c];
++        pthread_mutex_unlock(&Chunks.lock);
++
++        if (size > 0 && fwrite(text,size,1,stdout) != 1)
++          { fprintf(stderr,"%s: Cannot write %s output to standard output: %s\n",
++                           Prog_Name,"PAF",strerror(errno));
++            exit (1);
++          }
++        free(text);
++
++        pthread_mutex_lock(&Chunks.lock);
++        Chunks.emit = c+1;
++        pthread_cond_broadcast(&Chunks.change);
++        pthread_mutex_unlock(&Chunks.lock);
++      }
++
++#ifndef DEBUG_THREADS
++    for (p = 0; p < NTHREADS; p++)
        pthread_join(threads[p],NULL);
-@@ -849,6 +853,16 @@
+ #endif
+ 
+@@ -848,27 +941,9 @@
+         if (ISTWO)
            free(units2);
        }
-   
-+    //  A failed write to a part file only shows at flush time, so check each part before
-+    //    anything is sent to stdout.
-+
-+    for (p = 0; p < NTHREADS; p++)
-+      if (fflush(parm[p].out) != 0 || ferror(parm[p].out))
-+        { fprintf(stderr,"%s: Cannot write temporary file _paf.%d.%d.paf: %s\n",
-+                         Prog_Name,(int) getpid(),p,strerror(errno));
-+          exit (1);
-+        }
-+
-     //  Concatenate thread generated paf parts to stdout
+-  
+-    //  Concatenate thread generated paf parts to stdout
  
- #define PUSH_BLOCK 0x100000
-@@ -863,7 +877,16 @@
-         while (x >= PUSH_BLOCK)
-           { x = fread(buffer,1,PUSH_BLOCK,o);
-             if (x > 0)
+-#define PUSH_BLOCK 0x100000
+-
+-    buffer = Malloc(PUSH_BLOCK,"Allocating seek block");
+-
+-    for (p = 0; p < NTHREADS; p++)
+-      { FILE *o = parm[p].out;
+-
+-        rewind(o);
+-        x = PUSH_BLOCK;
+-        while (x >= PUSH_BLOCK)
+-          { x = fread(buffer,1,PUSH_BLOCK,o);
+-            if (x > 0)
 -              fwrite(buffer,x,1,stdout);
-+              if (fwrite(buffer,x,1,stdout) != 1)
-+                { fprintf(stderr,"%s: Cannot write %s output to standard output: %s\n",
-+                                 Prog_Name,"PAF",strerror(errno));
-+                  exit (1);
-+                }
-+          }
-+        if (ferror(o))
-+          { fprintf(stderr,"%s: Cannot read temporary file _paf.%d.%d.paf: %s\n",
-+                           Prog_Name,(int) getpid(),p,strerror(errno));
-+            exit (1);
-           }
-         fclose(o);
-       }
-@@ -877,5 +900,11 @@
+-          }
+-        fclose(o);
+-      }
+-
+-    free(buffer);
++    free(Chunks.text);
++    free(Chunks.size);
+   }
+ 
+   Close_GDB(gdb1);
+@@ -877,5 +952,11 @@
  
    oneFileClose(input);
  
