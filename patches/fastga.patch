@@ -3478,6 +3478,17 @@ diff --git a/GIXmake.c b/GIXmake.c
    for (i = 1; i < NTHREADS; i++)
      pthread_join(threads[i],NULL);
  #endif
+@@ -861,8 +915,8 @@
+         if (v & 0x40)
+           if (v & 0x20)
+             { extra = 0;
+-              while (v & 0x1)
+-                { extra -= 0x10000000;
++              while (v & 0x10)    // spacer byte (0x70/0xf0 from push); bit 0 is a data bit of the final word
++                { extra += 0x10000000;   // each spacer byte stands for +2^28 (push() subtracts it from the delta)
+                   v = *b++;
+                 }
+               last = 0;
 @@ -1004,7 +1058,7 @@
    uint8 *bend, *btop, *b;
  
@@ -3487,6 +3498,17 @@ diff --git a/GIXmake.c b/GIXmake.c
    int        *moff    = MASK_ANO->moff;
    int         nextm, lastm, pbg;
  
+@@ -1047,8 +1101,8 @@
+         if (v & 0x40)
+           if (v & 0x20)
+             { extra = 0;
+-              while (v & 0x1)
+-                { extra -= 0x10000000;
++              while (v & 0x10)    // spacer byte (0x70/0xf0 from push); bit 0 is a data bit of the final word
++                { extra += 0x10000000;   // each spacer byte stands for +2^28 (push() subtracts it from the delta)
+                   v = *b++;
+                 }
+               last = 0;
 @@ -1070,9 +1124,6 @@
  
        if (post >= nextpost)    //  if position is not in current contig, then fetch the next one
@@ -4592,6 +4614,17 @@ diff --git a/libfastk.h b/libfastk.h
 diff --git a/ONElib.c b/ONElib.c
 --- a/ONElib.c
 +++ b/ONElib.c
+@@ -81,8 +81,8 @@
+ int       vcMaxSerialSize();
+ int       vcSerialize(OneCodec *vc, void *out);
+ OneCodec *vcDeserialize(void *in);
+-int       vcEncode(OneCodec *vc, int ilen, char *ibytes, char *obytes);
+-int       vcDecode(OneCodec *vc, int ilen, char *ibytes, char *obytes);
++I64       vcEncode(OneCodec *vc, I64 ilen, char *ibytes, char *obytes);
++I64       vcDecode(OneCodec *vc, I64 ilen, char *ibytes, char *obytes);
+ 
+ // forward declarations of 64-bit integer encoding/decoding
+ 
 @@ -701,7 +701,10 @@
  
    provRefDefCleanup (vf) ;
@@ -4632,6 +4665,67 @@ diff --git a/ONElib.c b/ONElib.c
  }
  
  void oneFileClose (OneFile *vf)
+@@ -2853,8 +2862,8 @@
+   //    ilen is the number of bits in the compressed input, and the return value
+   //    is the number of bytes in the uncompressed output.  The routines are endian safe.
+ 
+-int       vcEncode(OneCodec *vc, int ilen, char *ibytes, char *obytes);
+-int       vcDecode(OneCodec *vc, int ilen, char *ibytes, char *obytes);
++I64       vcEncode(OneCodec *vc, I64 ilen, char *ibytes, char *obytes);
++I64       vcDecode(OneCodec *vc, I64 ilen, char *ibytes, char *obytes);
+ 
+   //  Rather than directly reading or writing an encoding of a compressor, the routines
+   //    below serialize or deserialize the compressor into/outof a user-supplied buffer.
+@@ -3476,16 +3485,17 @@
+   //  Encode ibytes[0..ilen) according to compressor vc and place in obytes
+   //  Return the # of bits used.
+ 
+-int vcEncode(OneCodec *vc, int ilen, char *ibytes, char *obytes)
++I64 vcEncode(OneCodec *vc, I64 ilen, char *ibytes, char *obytes)
+ { _OneCodec *v = (_OneCodec *) vc;
+ 
+   uint64  c, ocode, *ob;
+-  int     n, k, rem, tbits, ibits, esc, elen;
++  I64     k, tbits, ibits;     // 64-bit: a list >= 256MB overflows a 32-bit bit count
++  int     n, rem, esc, elen;
+   uint8  *clens, x, *bcode, *bb;
+   uint16 *cbits;
+ 
+   if (vc == DNAcodec)
+-    return (Compress_DNA(ilen,ibytes,obytes));
++    return (Compress_DNA((int) ilen,ibytes,obytes));
+ 
+   if (v->state < CODED_WITH) die("vcEncode: Compressor does not have a codec");
+ 
+@@ -3618,7 +3628,7 @@
+   //  Decode ilen bits in ibytes, into obytes according to vc's codec
+   //  Return the number of bytes decoded.
+ 
+-int vcDecode(OneCodec *vc, int ilen, char *ibytes, char *obytes)
++I64 vcDecode(OneCodec *vc, I64 ilen, char *ibytes, char *obytes)
+ { _OneCodec *v = (_OneCodec *) vc;
+ 
+   char   *look;
+@@ -3626,15 +3636,16 @@
+   uint64  icode, ncode, *p;
+   int     rem, nem;
+   uint8   c, *o;
+-  int     n, k, elen, inbig, esc;
++  I64     k;
++  int     n, elen, inbig, esc;
+ 
+   if (vc == DNAcodec)
+-    return (Uncompress_DNA(ibytes,ilen>>1,obytes));
++    return (Uncompress_DNA(ibytes,(int) (ilen>>1),obytes));
+ 
+   if (v->state < CODED_WITH) die("vcDecode: Compressor does not have a codec");
+ 
+   if (*((uint8 *) ibytes) == 0xff)
+-    { int olen = (ilen>>3)-1;
++    { I64 olen = (ilen>>3)-1;
+       memcpy(obytes,ibytes+1,olen);
+       return (olen);
+     }
 diff --git a/GDB.c b/GDB.c
 --- a/GDB.c
 +++ b/GDB.c
